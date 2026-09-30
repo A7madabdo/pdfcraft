@@ -91,6 +91,7 @@ pub fn ci(_: &[String]) -> anyhow::Result<()> {
         ("test", Box::new(|| run_args(&["test", "--workspace"]))),
         ("layers", Box::new(|| layers(&[]))),
         ("wasm", Box::new(|| wasm(&[]))),
+        ("assets", Box::new(|| crate::assets::run(&[]))),
     ];
     for (i, (name, f)) in steps.iter().enumerate() {
         eprintln!("\n=== ci: {name} ===");
