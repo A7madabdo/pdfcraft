@@ -1,0 +1,512 @@
+//! The tool catalogue: Acrobat's "All tools" information architecture, as data.
+//!
+//! Every UI (the egui shell today, anything tomorrow) builds its tool panel, palette and menus
+//! from this table; nothing is hard-coded in the toolkit. Each item names the command it will
+//! dispatch and the milestone (plan/execution-plan.md) in which it ships, so the UI can be honest
+//! about what works today.
+//!
+//! Source of the inventory: plan/acrobat/02-ui-ux.md §2 (observed in Acrobat Pro 26.002).
+
+/// Where a tool or item stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Availability {
+    /// Works in this build.
+    Ready,
+    /// Planned; ships in the named milestone.
+    Planned(&'static str),
+    /// Cloud-only in Acrobat; PrintCraft offers an optional pluggable provider instead.
+    Provider,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ToolItem {
+    pub label: &'static str,
+    pub icon: &'static str,
+    pub command: &'static str,
+    pub availability: Availability,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ToolSection {
+    pub title: &'static str,
+    pub items: &'static [ToolItem],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ToolGroup {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub icon: &'static str,
+    /// Icon tint, as Acrobat colour-codes its tool families.
+    pub hue: [u8; 3],
+    pub badge: Option<&'static str>,
+    pub availability: Availability,
+    pub sections: &'static [ToolSection],
+}
+
+const fn item(label: &'static str, icon: &'static str, command: &'static str, availability: Availability) -> ToolItem {
+    ToolItem { label, icon, command, availability }
+}
+
+use Availability::{Planned, Provider, Ready};
+
+const RED: [u8; 3] = [0xE0, 0x3E, 0x3E];
+const PURPLE: [u8; 3] = [0x8E, 0x4E, 0xE6];
+const BLUE: [u8; 3] = [0x3A, 0x6F, 0xE8];
+const GREEN: [u8; 3] = [0x2D, 0x9D, 0x5B];
+const ORANGE: [u8; 3] = [0xE8, 0x8A, 0x1A];
+const TEAL: [u8; 3] = [0x14, 0x9C, 0xA8];
+const PINK: [u8; 3] = [0xD6, 0x3B, 0x8F];
+
+pub static TOOL_GROUPS: &[ToolGroup] = &[
+    ToolGroup {
+        id: "export",
+        label: "Export a PDF",
+        icon: "file-output",
+        hue: BLUE,
+        badge: None,
+        availability: Planned("M10"),
+        sections: &[ToolSection {
+            title: "Export to",
+            items: &[
+                item("Microsoft Word (.docx)", "file-text", "export.docx", Planned("M10")),
+                item("Spreadsheet (.xlsx)", "grid-3x3", "export.xlsx", Planned("M10")),
+                item("Presentation (.pptx)", "presentation", "export.pptx", Planned("M10")),
+                item("Image (PNG, JPEG, TIFF)", "image", "export.image", Planned("M10")),
+                item("HTML web page", "file-symlink", "export.html", Planned("M10")),
+                item("Text (plain / accessible)", "type", "export.text", Planned("M10")),
+                item("PostScript / EPS", "file-down", "export.ps", Planned("M10")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "fill_sign",
+        label: "Fill & Sign",
+        icon: "pen-line",
+        hue: PURPLE,
+        badge: None,
+        availability: Planned("M5"),
+        sections: &[ToolSection {
+            title: "Fill",
+            items: &[
+                item("Add text", "type", "sign.fill.text", Planned("M5")),
+                item("Checkmark", "check", "sign.fill.check", Planned("M5")),
+                item("Cross", "x", "sign.fill.cross", Planned("M5")),
+                item("Date", "clock-3", "sign.fill.date", Planned("M5")),
+                item("Signature", "signature", "sign.fill.signature", Planned("M5")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "edit",
+        label: "Edit a PDF",
+        icon: "file-pen-line",
+        hue: PINK,
+        badge: None,
+        availability: Planned("M7"),
+        sections: &[
+            ToolSection {
+                title: "Modify page",
+                items: &[
+                    item("Rotate pages", "rotate-cw", "page.rotate", Planned("M4")),
+                    item("Insert pages", "file-plus-2", "page.insert", Planned("M4")),
+                    item("Delete pages", "trash-2", "page.delete", Planned("M4")),
+                    item("Extract pages", "file-output", "page.extract", Planned("M4")),
+                    item("Organize pages", "layout-grid", "page.organize", Ready),
+                ],
+            },
+            ToolSection {
+                title: "Add content",
+                items: &[
+                    item("Text", "type", "edit.text", Planned("M7")),
+                    item("Image", "image-plus", "edit.image", Planned("M7")),
+                    item("Header and footer", "heading", "edit.header_footer", Planned("M7")),
+                    item("Watermark", "stamp", "edit.watermark", Planned("M7")),
+                    item("Link", "link-2", "edit.link", Planned("M7")),
+                    item("Bates numbering", "hash", "edit.bates", Planned("M7")),
+                    item("Background", "palette", "edit.background", Planned("M7")),
+                    item("Attach file", "paperclip", "edit.attach", Planned("M12")),
+                ],
+            },
+        ],
+    },
+    ToolGroup {
+        id: "create",
+        label: "Create a PDF",
+        icon: "file-plus-2",
+        hue: RED,
+        badge: None,
+        availability: Planned("M10"),
+        sections: &[ToolSection {
+            title: "Create from",
+            items: &[
+                item("Single file", "file-input", "create.file", Planned("M10")),
+                item("Multiple files", "files", "create.multiple", Planned("M10")),
+                item("Images", "image", "create.images", Planned("M10")),
+                item("Clipboard", "copy-plus", "create.clipboard", Planned("M10")),
+                item("Blank page", "file-plus-2", "create.blank", Planned("M10")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "combine",
+        label: "Combine files",
+        icon: "files",
+        hue: BLUE,
+        badge: None,
+        availability: Planned("M4"),
+        sections: &[ToolSection { title: "Combine", items: &[item("Add files to combine", "files", "page.combine", Planned("M4"))] }],
+    },
+    ToolGroup {
+        id: "organize",
+        label: "Organize pages",
+        icon: "layout-grid",
+        hue: GREEN,
+        badge: None,
+        availability: Ready,
+        sections: &[
+            ToolSection {
+                title: "Page options",
+                items: &[
+                    item("Page grid", "layout-grid", "page.organize", Ready),
+                    item("Rotate", "rotate-cw", "page.rotate", Planned("M4")),
+                    item("Delete", "trash-2", "page.delete", Planned("M4")),
+                    item("Extract", "file-output", "page.extract", Planned("M4")),
+                    item("Insert", "file-plus-2", "page.insert", Planned("M4")),
+                    item("Replace", "replace", "page.replace", Planned("M4")),
+                    item("Split", "scissors", "page.split", Planned("M4")),
+                ],
+            },
+            ToolSection {
+                title: "More",
+                items: &[
+                    item("Set page boxes", "square-dashed-mouse-pointer", "page.boxes", Planned("M4")),
+                    item("Page labels", "tag", "page.labels", Planned("M4")),
+                    item("Page transitions", "presentation", "page.transitions", Planned("M4")),
+                ],
+            },
+        ],
+    },
+    ToolGroup {
+        id: "comment",
+        label: "Add comments",
+        icon: "message-square-text",
+        hue: ORANGE,
+        badge: None,
+        availability: Planned("M5"),
+        sections: &[
+            ToolSection {
+                title: "Markup",
+                items: &[
+                    item("Sticky note", "sticky-note", "comment.note", Planned("M5")),
+                    item("Highlight text", "highlighter", "comment.highlight", Planned("M5")),
+                    item("Underline", "underline", "comment.underline", Planned("M5")),
+                    item("Strikethrough", "strikethrough", "comment.strikeout", Planned("M5")),
+                    item("Text box", "type", "comment.freetext", Planned("M5")),
+                ],
+            },
+            ToolSection {
+                title: "Drawing",
+                items: &[
+                    item("Draw freehand", "pencil", "comment.ink", Planned("M5")),
+                    item("Rectangle", "square", "comment.square", Planned("M5")),
+                    item("Oval", "circle", "comment.circle", Planned("M5")),
+                    item("Line / arrow", "arrow-up-right", "comment.line", Planned("M5")),
+                    item("Cloud", "cloud", "comment.cloud", Planned("M5")),
+                    item("Stamp", "stamp", "comment.stamp", Planned("M5")),
+                ],
+            },
+            ToolSection { title: "Review", items: &[item("Comment list", "message-square-text", "comment.list", Ready)] },
+        ],
+    },
+    ToolGroup {
+        id: "scan",
+        label: "Scan & OCR",
+        icon: "scan-text",
+        hue: GREEN,
+        badge: None,
+        availability: Planned("M10"),
+        sections: &[ToolSection {
+            title: "Recognize text",
+            items: &[
+                item("In this file", "scan-text", "ocr.recognize", Planned("M10")),
+                item("In multiple files", "files", "ocr.recognize_batch", Planned("M10")),
+                item("Enhance scanned file", "sparkles", "ocr.enhance", Planned("M10")),
+                item("Correct recognized text", "text-select", "ocr.correct", Planned("M10")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "protect",
+        label: "Protect a PDF",
+        icon: "shield-check",
+        hue: BLUE,
+        badge: None,
+        availability: Planned("M8"),
+        sections: &[
+            ToolSection {
+                title: "Protect",
+                items: &[
+                    item("Protect with password", "lock", "protect.password", Planned("M8")),
+                    item("Remove hidden information", "eye-off", "protect.sanitize", Planned("M8")),
+                ],
+            },
+            ToolSection {
+                title: "Advanced options",
+                items: &[
+                    item("Encrypt with certificate", "file-lock-2", "protect.certificate", Planned("M8")),
+                    item("Security properties", "shield-check", "protect.properties", Ready),
+                    item("Remove security", "lock", "protect.remove", Planned("M8")),
+                ],
+            },
+        ],
+    },
+    ToolGroup {
+        id: "redact",
+        label: "Redact a PDF",
+        icon: "rectangle-horizontal",
+        hue: RED,
+        badge: None,
+        availability: Planned("M8"),
+        sections: &[ToolSection {
+            title: "Redact",
+            items: &[
+                item("Redact text and images", "rectangle-horizontal", "redact.mark", Planned("M8")),
+                item("Redact pages", "file-x", "redact.pages", Planned("M8")),
+                item("Find text and redact", "file-search", "redact.search", Planned("M8")),
+                item("Sanitize document", "sparkles", "redact.sanitize", Planned("M8")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "compress",
+        label: "Compress a PDF",
+        icon: "file-down",
+        hue: RED,
+        badge: None,
+        availability: Planned("M11"),
+        sections: &[ToolSection {
+            title: "Optimize",
+            items: &[
+                item("Reduce file size", "file-down", "optimize.reduce", Planned("M11")),
+                item("Advanced optimization", "settings-2", "optimize.advanced", Planned("M11")),
+                item("Audit space usage", "gauge", "optimize.audit", Planned("M11")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "form",
+        label: "Prepare a form",
+        icon: "text-cursor-input",
+        hue: PURPLE,
+        badge: None,
+        availability: Planned("M6"),
+        sections: &[
+            ToolSection { title: "Fields", items: &[item("Field list", "list", "form.fields", Ready)] },
+            ToolSection {
+                title: "Add form components",
+                items: &[
+                    item("Text field", "text-cursor-input", "form.add.text", Planned("M6")),
+                    item("Checkbox", "check-circle-2", "form.add.checkbox", Planned("M6")),
+                    item("Radio button", "circle", "form.add.radio", Planned("M6")),
+                    item("Drop-down list", "chevron-down", "form.add.combo", Planned("M6")),
+                    item("List box", "list", "form.add.list", Planned("M6")),
+                    item("Button", "square", "form.add.button", Planned("M6")),
+                    item("Date field", "clock-3", "form.add.date", Planned("M6")),
+                    item("Digital signature", "signature", "form.add.signature", Planned("M6")),
+                ],
+            },
+        ],
+    },
+    ToolGroup {
+        id: "stamp",
+        label: "Add a stamp",
+        icon: "stamp",
+        hue: PURPLE,
+        badge: None,
+        availability: Planned("M5"),
+        sections: &[ToolSection { title: "Stamps", items: &[item("Stamp palette", "stamp", "comment.stamp", Planned("M5"))] }],
+    },
+    ToolGroup {
+        id: "certificate",
+        label: "Use a certificate",
+        icon: "badge-check",
+        hue: TEAL,
+        badge: None,
+        availability: Planned("M9"),
+        sections: &[ToolSection {
+            title: "Certificates",
+            items: &[
+                item("Digitally sign", "signature", "sign.digital", Planned("M9")),
+                item("Timestamp", "clock-3", "sign.timestamp", Planned("M9")),
+                item("Validate all signatures", "badge-check", "sign.validate", Planned("M9")),
+                item("Certify (visible signature)", "badge-check", "sign.certify", Planned("M9")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "print_production",
+        label: "Use print production",
+        icon: "printer",
+        hue: PURPLE,
+        badge: None,
+        availability: Planned("M11"),
+        sections: &[ToolSection {
+            title: "Print production",
+            items: &[
+                item("Output preview", "layers", "prepress.output_preview", Planned("M11")),
+                item("Preflight", "file-check", "preflight.run", Planned("M11")),
+                item("Convert colors", "palette", "prepress.convert_colors", Planned("M11")),
+                item("Set page boxes", "square-dashed-mouse-pointer", "page.boxes", Planned("M11")),
+                item("Add printer marks", "ruler", "prepress.marks", Planned("M11")),
+                item("Fix hairlines", "minus", "prepress.hairlines", Planned("M11")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "measure",
+        label: "Measure objects",
+        icon: "ruler",
+        hue: PINK,
+        badge: None,
+        availability: Planned("M12"),
+        sections: &[ToolSection {
+            title: "Measure",
+            items: &[
+                item("Measuring tool", "ruler", "measure.distance", Planned("M12")),
+                item("Geospatial location", "compass", "measure.geo", Planned("M12")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "compare",
+        label: "Compare files",
+        icon: "git-compare",
+        hue: PINK,
+        badge: None,
+        availability: Planned("M12"),
+        sections: &[ToolSection { title: "Compare", items: &[item("Select files to compare", "git-compare", "compare.files", Planned("M12"))] }],
+    },
+    ToolGroup {
+        id: "actions",
+        label: "Use guided actions",
+        icon: "list-checks",
+        hue: PURPLE,
+        badge: None,
+        availability: Planned("M13"),
+        sections: &[ToolSection {
+            title: "Actions list",
+            items: &[
+                item("Make accessible", "accessibility", "actions.make_accessible", Planned("M13")),
+                item("Prepare for distribution", "send", "actions.distribution", Planned("M13")),
+                item("Optimize scanned documents", "scan-text", "actions.optimize_scans", Planned("M13")),
+                item("Archive documents", "file-check", "actions.archive", Planned("M13")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "accessibility",
+        label: "Prepare for accessibility",
+        icon: "accessibility",
+        hue: PURPLE,
+        badge: None,
+        availability: Planned("M12"),
+        sections: &[ToolSection {
+            title: "Accessibility",
+            items: &[
+                item("Automatically tag PDF", "tag", "a11y.autotag", Planned("M12")),
+                item("Check for accessibility", "accessibility", "a11y.check", Planned("M12")),
+                item("Fix reading order", "list-ordered", "a11y.reading_order", Planned("M12")),
+                item("Add alternate text", "image", "a11y.alt_text", Planned("M12")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "standards",
+        label: "Apply PDF standards",
+        icon: "file-check",
+        hue: RED,
+        badge: None,
+        availability: Planned("M11"),
+        sections: &[ToolSection {
+            title: "Standards",
+            items: &[
+                item("Save as PDF/A", "file-check", "standards.pdfa", Planned("M11")),
+                item("Save as PDF/X", "file-check", "standards.pdfx", Planned("M11")),
+                item("Save as PDF/UA", "accessibility", "standards.pdfua", Planned("M11")),
+                item("Preflight", "file-check", "preflight.run", Planned("M11")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "search_index",
+        label: "Add search index",
+        icon: "file-search",
+        hue: GREEN,
+        badge: None,
+        availability: Planned("M12"),
+        sections: &[ToolSection { title: "Index", items: &[item("Manage embedded index", "file-search", "search.index", Planned("M12"))] }],
+    },
+    ToolGroup {
+        id: "javascript",
+        label: "Use JavaScript",
+        icon: "braces",
+        hue: BLUE,
+        badge: None,
+        availability: Planned("M6"),
+        sections: &[ToolSection {
+            title: "JavaScript",
+            items: &[
+                item("Console", "braces", "js.console", Planned("M6")),
+                item("Document JavaScripts", "file-text", "js.document", Planned("M6")),
+                item("Document actions", "list-checks", "js.actions", Planned("M6")),
+            ],
+        }],
+    },
+    ToolGroup {
+        id: "ai",
+        label: "AI assistant",
+        icon: "sparkles",
+        hue: PINK,
+        badge: Some("Optional"),
+        availability: Provider,
+        sections: &[ToolSection {
+            title: "Bring your own model (off by default)",
+            items: &[
+                item("Summarize", "sparkles", "ai.summary", Provider),
+                item("Ask about this document", "message-circle-reply", "ai.ask", Provider),
+                item("Translate", "languages", "ai.translate", Provider),
+            ],
+        }],
+    },
+];
+
+pub fn group(id: &str) -> Option<&'static ToolGroup> {
+    TOOL_GROUPS.iter().find(|g| g.id == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn ids_are_unique_and_every_group_has_items() {
+        let mut seen = HashSet::new();
+        for g in TOOL_GROUPS {
+            assert!(seen.insert(g.id), "duplicate group id {}", g.id);
+            assert!(g.sections.iter().any(|s| !s.items.is_empty()), "{} has no items", g.id);
+        }
+    }
+
+    #[test]
+    fn commands_are_namespaced() {
+        for g in TOOL_GROUPS {
+            for s in g.sections {
+                for i in s.items {
+                    assert!(i.command.contains('.'), "{} lacks a namespace", i.command);
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,32 @@
+# PrintCraft — instructions for agents
+
+PrintCraft is a clean-room, open-source, Rust-native PDF application targeting Adobe Acrobat Pro parity. It runs natively on macOS, Windows and Linux, and on the web via WASM. It is the sibling of `../photocraft` (a Photoshop-class editor) and follows the same conventions.
+
+## Start every session here
+1. Read `plan/STATUS.md`: the current milestone, the next unchecked task and any blockers.
+2. Read that task in `plan/execution-plan.md` §3, the relevant section of `plan/architecture.md`, and the README of the crate you're touching.
+3. Follow the **autonomous operation protocol** in `plan/execution-plan.md` §7 (orient → plan → implement + test → verify → record → commit). Don't stop to ask unless §7 lists the decision as the user's.
+
+`plan/` is gitignored (local-only, like PhotoCraft). The machine-readable parity checklist lives in `parity/` (committed).
+
+## Non-negotiables
+- **Clean-room.**
+  - Never read, disassemble or copy anything inside the Acrobat bundle (names and listings only). **Never open `Contents/Resources/JavaScripts/`.**
+  - Behaviour comes from public docs, specs (ISO 32000-2, the Arlington model) and black-box observation (`plan/acrobat/`).
+  - Never copy GPL/AGPL code. MuPDF, Ghostscript, Poppler, veraPDF and DSS run only as external oracle processes.
+  - See `plan/README.md` §Clean-room and `plan/adr/0001`.
+- **Privacy.** When observing Acrobat, use synthetic fixtures only. Never capture the Home view, recent files or account info. Capture by window id (`plan/acrobat/tools/`). Never commit Acrobat outputs, corpus files or personal data.
+- **Layering.** Nothing below L7 depends on egui/winit/eframe/rfd (`plan/architecture.md` §3). `cos`/`filters`/`crypt`/`arlington` stay standalone.
+- **Fidelity.** The PDF object graph is the model. Preserve unknown data. Saves are incremental unless a full rewrite is required. Never silently drop or repair data without recording it.
+- **Rust only** in the product and build (`xtask`). No handwritten JS/TS.
+- **Quality gates** before every commit: `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace`, and the wasm check once `xtask ci` exists (M0).
+- **Commits:** one task id per commit (e.g. `M1.4: xref stream reader`). Commit only green states. End messages with the attribution line required by the environment.
+
+## Running and looking at the app
+- `cargo run -p printcraft -- <file.pdf>` opens the desktop app.
+- `cargo xtask demo-pdf` builds `dist/demo/printcraft-showcase.pdf` (needs Chrome) for visual checks.
+- For UI work, **look at the result**: screenshot the window by id (`plan/acrobat/tools/winlist.swift` + `screencapture -l`) until the UI control channel (M3.9) exists, then use `ui.screenshot`. Compare against `plan/acrobat/02-ui-ux.md`.
+- Parallel agents: use a separate `CARGO_TARGET_DIR` per agent and separate git worktrees.
+
+## Current bootstrap debt (tracked in STATUS.md)
+- `printcraft-render` renders through the `hayro` crate directly and inspects documents through `lopdf`. Both get replaced by `cos` / `model` / the DisplayList device (M1–M2, ADR-0004).

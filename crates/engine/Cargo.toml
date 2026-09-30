@@ -1,0 +1,12 @@
+[package]
+name = "printcraft-engine"
+description = "PrintCraft engine façade: session, documents, command/tool catalogue"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+printcraft-render = { workspace = true }

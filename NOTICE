@@ -1,0 +1,15 @@
+PrintCraft
+Copyright the PrintCraft contributors. Licensed under MIT OR Apache-2.0.
+
+This product bundles or depends on third-party material under the following licences:
+
+- Lucide icons (assets/icons/*.svg) — ISC License. See assets/icons/LICENSE-lucide.txt.
+- Inter typeface (assets/fonts/Inter-*.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-Inter.txt.
+- JetBrains Mono typeface (assets/fonts/JetBrainsMono-*.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-JetBrainsMono.txt.
+- hayro (rendering, via crates.io) — Apache-2.0 OR MIT. Its `embed-fonts` feature bundles the Foxit
+  standard-14 Type 1 fonts under BSD-3-Clause ("Copyright 2014 PDFium Authors"), and hayro-cmap bundles
+  Adobe CMap resources under BSD-3-Clause.
+- lopdf (bootstrap document inspection, via crates.io) — MIT.
+
+Asset licences are not visible to cargo-deny; keep this file current whenever assets or asset-bundling
+dependencies change (plan/adr/0002, 0006).

@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "xtask"]
+default-members = ["crates/*", "apps/printcraft", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.90"
+repository = "https://github.com/storytold/printcraft"
+
+[workspace.dependencies]
+# internal
+printcraft-geom = { path = "crates/geom" }
+printcraft-render = { path = "crates/render" }
+printcraft-engine = { path = "crates/engine" }
+printcraft-ui-egui = { path = "crates/ui-egui" }
+
+# pdf
+hayro = "0.7.1"
+hayro-syntax = "0.7.2"
+lopdf = "0.45"
+
+# foundation
+thiserror = "2"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+log = "0.4"
+kurbo = "0.12"
+
+# ui
+egui = "0.36"
+egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
+eframe = { version = "0.36", default-features = false }
+egui_kittest = "0.36"
+rfd = "0.17"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
