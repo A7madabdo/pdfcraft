@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/*", "xtask"]
-default-members = ["crates/*", "apps/printcraft", "xtask"]
+exclude = ["vendor"]
+default-members = ["crates/*", "apps/printcraft", "apps/printcraft-cli", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +14,9 @@ repository = "https://github.com/storytold/printcraft"
 [workspace.dependencies]
 # internal
 printcraft-geom = { path = "crates/geom" }
+printcraft-filters = { path = "crates/filters" }
+printcraft-cos = { path = "crates/cos" }
+printcraft-organize = { path = "crates/organize" }
 printcraft-render = { path = "crates/render" }
 printcraft-engine = { path = "crates/engine" }
 printcraft-ui-egui = { path = "crates/ui-egui" }
@@ -21,13 +25,18 @@ printcraft-ui-egui = { path = "crates/ui-egui" }
 hayro = "0.7.1"
 hayro-syntax = "0.7.2"
 lopdf = "0.45"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+weezl = "0.2"
 
 # foundation
 thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 log = "0.4"
-kurbo = "0.12"
+kurbo = "0.13"
+
+# testing
+proptest = "1"
 
 # ui
 egui = "0.36"
@@ -52,3 +61,8 @@ opt-level = 1
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Vendored, patched third-party crates (see vendor/README.md). Each patch is meant to go upstream.
+[patch.crates-io]
+hayro-interpret = { path = "vendor/hayro-interpret" }
+hayro = { path = "vendor/hayro" }

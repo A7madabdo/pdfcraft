@@ -39,8 +39,11 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "PrintCraft",
         native,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
             let mut app = PrintCraftApp::new();
+            if let Some(json) = cc.storage.and_then(|s| s.get_string("printcraft")) {
+                app.restore(&json);
+            }
             app.integrated_titlebar = integrated;
             for f in files {
                 app.open_path(&f);

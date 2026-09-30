@@ -1,0 +1,80 @@
+# PrintCraft roadmap
+
+The milestones, current progress and time estimates to Acrobat Pro feature parity. Keep this up to date:
+- **Every session:** update the progress column and add a line to the log.
+- **Every milestone:** re-estimate.
+
+Detailed task lists and acceptance tests are in `plan/execution-plan.md` (local-only). This file is the public summary.
+
+**What "parity" means here:** the offline feature set of Acrobat Pro, milestones M0–M14. It excludes Adobe's cloud services (Document Cloud storage, Adobe Sign, the Adobe AI Assistant). Those have no clean-room equivalent; PrintCraft's alternatives are local-first, plus opt-in providers (M13).
+
+## Estimate summary
+
+The unit is **wall-clock hours of agent work**: Claude Opus-class models coding continuously, with a person reviewing at milestone boundaries. Time spent waiting for that review is not included.
+
+| Scenario | Hours to parity (M0–M14) | Continuous calendar time |
+|---|---|---|
+| One agent, 24/7 | **2,000–4,000 h** | ≈ 3–6 months |
+| 3–5 agents in parallel on separate crates after M4 | **800–1,500 h** | ≈ 5–9 weeks |
+| Realistic, with human review, integration and pauses | — | ≈ 4–9 months (see `plan/execution-plan.md` §9) |
+
+**How these numbers are built:**
+- **Size:** about 450–700k lines of Rust at parity, including tests. The repo has about 15k today.
+- **Rate:** so far, about 1.0–1.5k lines of *kept, tested* code per agent-hour. That includes debugging against the oracles (qpdf, poppler, pdf.js corpus).
+- **Why the total is 3–6× the raw typing time:** the hard work is not the line count. Most of the time goes into fidelity work: text editing and reflow, font embedding, redaction that really removes content, signature validation, PDF/A and PDF/UA, XFA, OCR and web performance. Each of these needs repeated oracle checks and visual comparison.
+- **Parallelism is limited early:** M0–M4 are mostly sequential, because the core crates must settle first. Extra agents pay off from M5 onwards.
+- **The long tail:** the last 5–10% (odd real-world files, pixel-level polish) costs about as much as the first 50%.
+
+## Milestones
+
+Hours are for a single agent (low–high). "Done" is the estimated fraction of that milestone's *acceptance criteria* that are met. It is not a count of lines of code.
+
+| M | Milestone | Est. hours | Done | Remaining (h) | Notes |
+|---|---|---|---|---|---|
+| M0 | Skeleton: workspace, xtask gates, CI | 15–30 | 70% | 5–10 | Missing: GitHub workflow, `deny.toml`, remaining crate stubs, parity TOML |
+| M1 | COS: filters, crypt, parser, xref, writer | 120–200 | 40% | 70–120 | Filters done. cos parses every xref form, repairs damaged files, and writes incremental and full saves. Open, edit and save pass on 946 of 951 corpus files. Missing: crypt (R2–R6), object-stream and xref-stream output for full saves, fuzzing, ≥ 250 tests |
+| M2 | Model, render, text | 200–350 | 15% | 170–300 | hayro bootstrap renderer (vendored patches). Text extraction reaches word-F1 0.98 against pdftotext. Missing: model crate, fonts, DisplayList, renderer independent of hayro |
+| M3 | Viewer app (native + web) | 80–150 | 65% | 30–55 | Acrobat-style shell, find, select, panels, tiles, web build. Missing: UI control channel, 60 fps test on a 500-page document, snapshot tests of every panel |
+| M4 | Engine, history, save, organize | 100–180 | 30% | 70–125 | Done: page rotate, delete, move and insert blank; info edits; undo/redo (⌘Z/⇧⌘Z, Edit menu); save and save-as (incremental, atomic write, web download); a dot on tabs with unsaved changes; save prompt on close and quit; organize-grid multi-select; CLI `edit`. Missing: command registry, autosave and recovery, combine/split, bookmark and label editing, drag-to-reorder |
+| M5 | Comments (all annotation types, XFDF) | 120–200 | 0% | 120–200 | Read-only comments panel exists |
+| M6 | Forms + JavaScript | 160–320 | 0% | 160–320 | Fields are displayed, not filled |
+| M7 | Content editing (text, images, header/footer, watermark) | 250–500 | 0% | 250–500 | Longest pole |
+| M8 | Security + redaction | 100–180 | 0% | 100–180 | |
+| M9 | Signatures (PAdES, validation) | 160–280 | 0% | 160–280 | |
+| M10 | OCR, create, export, print | 200–350 | 0% | 200–350 | |
+| M11 | Optimize, preflight, PDF/A/X/UA, print production | 200–350 | 0% | 200–350 | |
+| M12 | Accessibility, compare, measure, search, XFA | 200–380 | 0% | 200–380 | |
+| M13 | Automation (MCP, Action Wizard, CLI) + AI providers | 60–120 | 0% | 60–120 | |
+| M14 | 1.0 polish: performance, localization, installers | 120–250 | 0% | 120–250 | |
+| | **Total** | **2,085–3,840** | **≈ 5%** | **≈ 1,915–3,540** | |
+
+**Overall progress: about 5% of the effort.** The viewer and the core are far ahead of the editing features, because the viewer was built first so progress could be seen.
+
+## Critical path
+
+M0 → M1 → M2 → M3 → M4 must happen in order. After M4, M5–M12 can run in parallel across crates. The long poles are M7 (content editing), M9 (signatures) and M12 (XFA).
+
+## Risks most likely to push estimates up
+
+- Fidelity of text editing: fonts, subsets, reflow.
+- XFA dynamic layout.
+- Real-world signature chains and revocation checks.
+- The rendering long tail: Type3 fonts, broken fonts, shadings.
+- Correctness of PDF/A and PDF/UA conversion.
+- CPU rendering performance on the web.
+
+## Log
+
+Newest first. One line per session: the date, what moved, and the new overall percentage.
+
+- **2026-09-30 (session 3):**
+  - New crates: `filters` (every non-image filter, 57 tests) and `cos` (object parser, xref reader, repair, incremental and full writer).
+  - New `organize` crate: page operations and info edits.
+  - Engine: editing with undo/redo and save. CLI: `edit`.
+  - UI: organize toolbar with multi-select, ⌘Z/⇧⌘Z/⌘S/⇧⌘S, Edit menu, editable Description properties, a dot on tabs with unsaved changes, and a save prompt on close and quit. 13 new kittest tests.
+  - Corpus: open, edit and save round-trip on 946 of 951 files. 182 of 182 sampled saved outputs pass `qpdf --check`.
+  - Overall ≈ 5%.
+- **2026-09-30 (session 2):**
+  - Robustness sweep (963 of 983 files open, 0 crashes), text layer, find and select, tiles, web build, polish.
+  - Overall ≈ 3–4%.
+- **2026-09-30 (session 1):** planning complete; viewer vertical slice.

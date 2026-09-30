@@ -7,8 +7,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use hayro::hayro_syntax::DecryptionError;
+use hayro::hayro_syntax::LoadPdfError;
 use hayro::hayro_syntax::Pdf;
-use lopdf::{Dictionary, Document, Object, ObjectId};
+use lopdf::{Dictionary, Document, LoadOptions, Object, ObjectId};
 
 use crate::OpenError;
 
@@ -31,6 +35,7 @@ pub struct DocInfo {
     pub fields: Vec<Field>,
     pub links: Vec<Link>,
     pub layers: Vec<Layer>,
+    pub fonts: Vec<FontInfo>,
     pub attachments: Vec<Attachment>,
     pub warnings: Vec<String>,
 }
@@ -112,6 +117,8 @@ pub struct Field {
 
 #[derive(Clone, Debug)]
 pub struct Layer {
+    /// Object number and generation of the optional content group.
+    pub id: (u32, u16),
     pub name: String,
     pub visible: bool,
 }
@@ -121,30 +128,92 @@ pub struct Attachment {
     pub name: String,
     pub description: Option<String>,
     pub size: Option<usize>,
+    pub source: AttachmentSource,
 }
 
-/// Inspect a document. Fails only if the renderer itself cannot open the file.
-pub fn inspect(bytes: Arc<Vec<u8>>) -> Result<DocInfo, OpenError> {
-    let pdf = Pdf::new(bytes.clone()).map_err(|e| match format!("{e:?}") {
-        s if s.to_lowercase().contains("encrypt") || s.to_lowercase().contains("password") => OpenError::NeedsPassword,
-        s => OpenError::Invalid(s),
-    })?;
+/// Where an attachment lives (so its bytes can be fetched on demand).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttachmentSource {
+    /// Document-level: `/Names /EmbeddedFiles` entry with this key.
+    Document { key: String },
+    /// A FileAttachment annotation: page index and position in the page's `/Annots`.
+    Annotation { page: usize, index: usize },
+}
+
+/// A font used by the document (Document Properties ▸ Fonts).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontInfo {
+    /// BaseFont without the subset tag.
+    pub name: String,
+    /// Type1, TrueType, Type0, Type3, MMType1, CIDFontType0/2 …
+    pub kind: String,
+    pub embedded: bool,
+    pub subset: bool,
+    pub encoding: Option<String>,
+}
+
+/// Inspect a document. Fails only if the renderer itself cannot open the file (or needs a
+/// password). Never panics: parser crashes are caught and reported.
+pub fn inspect(bytes: Arc<Vec<u8>>, password: Option<&str>) -> Result<DocInfo, OpenError> {
+    let pdf = catch_unwind(AssertUnwindSafe(|| Pdf::new_with_password(bytes.clone(), password.unwrap_or(""))))
+        .map_err(|p| OpenError::Invalid(format!("the parser crashed: {}", crate::raster::panic_message(&p))))?
+        .map_err(|e| match e {
+            LoadPdfError::Decryption(DecryptionError::PasswordProtected) => {
+                if password.is_some() {
+                    OpenError::WrongPassword
+                } else {
+                    OpenError::NeedsPassword
+                }
+            }
+            LoadPdfError::Decryption(other) => OpenError::Unsupported(format!("encryption not supported: {other:?}")),
+            LoadPdfError::Invalid => OpenError::Invalid("no readable page tree or cross-reference data was found".into()),
+        })?;
     let mut info = DocInfo { file_size: bytes.len(), pdf_version: format!("{:?}", pdf.version()), ..Default::default() };
-    for (i, page) in pdf.pages().iter().enumerate() {
-        let (w, h) = page.render_dimensions();
-        let c = page.intersected_crop_box();
-        let rotation = match page.rotation() {
-            hayro::hayro_syntax::page::Rotation::None => 0,
-            hayro::hayro_syntax::page::Rotation::Horizontal => 90,
-            hayro::hayro_syntax::page::Rotation::Flipped => 180,
-            hayro::hayro_syntax::page::Rotation::FlippedHorizontal => 270,
-        };
-        let crop = [c.x0 as f32, c.y0 as f32, c.x1 as f32, c.y1 as f32];
-        info.pages.push(PageInfo { width: w, height: h, label: (i + 1).to_string(), crop, rotation });
+    let pages = catch_unwind(AssertUnwindSafe(|| {
+        let mut out = Vec::new();
+        for (i, page) in pdf.pages().iter().enumerate() {
+            let (w, h) = page.render_dimensions();
+            let c = page.intersected_crop_box();
+            let rotation = match page.rotation() {
+                hayro::hayro_syntax::page::Rotation::None => 0,
+                hayro::hayro_syntax::page::Rotation::Horizontal => 90,
+                hayro::hayro_syntax::page::Rotation::Flipped => 180,
+                hayro::hayro_syntax::page::Rotation::FlippedHorizontal => 270,
+            };
+            let crop = [c.x0 as f32, c.y0 as f32, c.x1 as f32, c.y1 as f32];
+            // Degenerate boxes still get a usable placeholder size so layout never divides by zero.
+            let (w, h) = if w.is_finite() && h.is_finite() && w >= 1.0 && h >= 1.0 { (w, h) } else { (612.0, 792.0) };
+            out.push(PageInfo { width: w, height: h, label: (i + 1).to_string(), crop, rotation });
+        }
+        out
+    }));
+    match pages {
+        Ok(p) => info.pages = p,
+        Err(p) => return Err(OpenError::Invalid(format!("the page tree could not be read: {}", crate::raster::panic_message(&p)))),
     }
-    match Document::load_mem(&bytes) {
-        Ok(doc) => Inspector::new(&doc).fill(&mut info),
-        Err(e) => info.warnings.push(format!("structure inspection unavailable: {e}")),
+    let options = LoadOptions { password: password.map(str::to_owned), ..LoadOptions::default() };
+    let structure = catch_unwind(AssertUnwindSafe(|| match Document::load_mem_with_options(&bytes, options) {
+        Ok(doc) => {
+            let mut tmp = DocInfo::default();
+            std::mem::swap(&mut tmp.pages, &mut info.pages);
+            Inspector::new(&doc).fill(&mut tmp);
+            Ok(tmp)
+        }
+        Err(e) => Err(e.to_string()),
+    }));
+    match structure {
+        Ok(Ok(mut filled)) => {
+            filled.file_size = info.file_size;
+            filled.pdf_version = std::mem::take(&mut info.pdf_version);
+            info = filled;
+        }
+        Ok(Err(e)) => info.warnings.push(format!("Some document structure (bookmarks, comments, fields) could not be read: {e}")),
+        Err(p) => {
+            info.warnings.push(format!("Document structure inspection crashed and was skipped: {}", crate::raster::panic_message(&p)));
+        }
+    }
+    if info.pages.is_empty() {
+        return Err(OpenError::Invalid("the document has no pages".into()));
     }
     Ok(info)
 }
@@ -194,11 +263,12 @@ impl<'a> Inspector<'a> {
         }
         info.has_javascript |= info.fields.iter().any(|f| f.has_actions);
         self.layers(catalog, &mut info.layers);
+        self.fonts(&mut info.fonts);
         if let Some(names) = catalog.get(b"Names").ok().and_then(|o| self.dict(o)) {
             if let Some(ef) = names.get(b"EmbeddedFiles").ok().and_then(|o| self.dict(o)) {
                 let mut seen = HashSet::new();
                 for (name, spec) in self.name_tree(ef, &mut seen, 0) {
-                    info.attachments.push(self.attachment(name, spec));
+                    info.attachments.push(self.attachment(name.clone(), spec, AttachmentSource::Document { key: name }));
                 }
             }
             info.has_javascript |= names.get(b"JavaScript").is_ok();
@@ -379,9 +449,15 @@ impl<'a> Inspector<'a> {
         for (&id, &page) in &self.page_index {
             let Ok(page_dict) = self.doc.get_dictionary(id) else { continue };
             let Ok(Object::Array(annots)) = page_dict.get(b"Annots").map(|o| self.resolve(o)) else { continue };
-            for a in annots {
+            for (index, a) in annots.iter().enumerate() {
                 let Some(d) = self.dict(a) else { continue };
                 let Some(subtype) = self.name(d, b"Subtype") else { continue };
+                if subtype == "FileAttachment"
+                    && let Ok(fs) = d.get(b"FS")
+                {
+                    let name = self.text(d, b"Contents").unwrap_or_else(|| "attachment".into());
+                    info.attachments.push(self.attachment(name, fs, AttachmentSource::Annotation { page, index }));
+                }
                 if subtype == "Link" {
                     if let Some(link) = self.link(page, d) {
                         if matches!(&link.target, LinkTarget::Other(s) if s == "JavaScript") {
@@ -541,11 +617,55 @@ impl<'a> Inspector<'a> {
                 Some(id) if on.contains(&id) => true,
                 _ => !base_off,
             };
-            out.push(Layer { name: self.text(d, b"Name").unwrap_or_else(|| "Layer".into()), visible });
+            let Some(id) = id else { continue };
+            out.push(Layer { id, name: self.text(d, b"Name").unwrap_or_else(|| "Layer".into()), visible });
         }
     }
 
-    fn attachment(&self, name: String, spec: &Object) -> Attachment {
+    fn fonts(&self, out: &mut Vec<FontInfo>) {
+        let mut seen = HashSet::new();
+        let mut pages: Vec<_> = self.page_index.iter().collect();
+        pages.sort_by_key(|(_, i)| **i);
+        for (&pid, _) in pages {
+            let Ok(fonts) = self.doc.get_page_fonts(pid) else { continue };
+            for (_, f) in fonts {
+                let base = f
+                    .get(b"BaseFont")
+                    .ok()
+                    .and_then(|o| o.as_name().ok())
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .unwrap_or_else(|| "(unnamed)".into());
+                let kind = self.name(f, b"Subtype").unwrap_or_default();
+                let encoding = match f.get(b"Encoding").map(|o| self.resolve(o)) {
+                    Ok(Object::Name(n)) => Some(String::from_utf8_lossy(n).into_owned()),
+                    Ok(Object::Dictionary(_)) => Some("Custom".into()),
+                    Ok(Object::Stream(_)) => Some("Embedded CMap".into()),
+                    _ => None,
+                };
+                // Embedded: FontFile/2/3 in the descriptor (for Type0, in the descendant font).
+                let descriptor_of = |d: &Dictionary| d.get(b"FontDescriptor").ok().and_then(|o| self.dict(o)).cloned();
+                let desc = descriptor_of(f).or_else(|| {
+                    f.get(b"DescendantFonts")
+                        .ok()
+                        .and_then(|o| self.resolve(o).as_array().ok())
+                        .and_then(|a| a.first())
+                        .and_then(|o| self.dict(o))
+                        .and_then(descriptor_of)
+                });
+                let embedded =
+                    kind == "Type3" || desc.is_some_and(|d| d.get(b"FontFile").is_ok() || d.get(b"FontFile2").is_ok() || d.get(b"FontFile3").is_ok());
+                let subset = base.len() > 7 && base.as_bytes()[6] == b'+' && base[..6].bytes().all(|b| b.is_ascii_uppercase());
+                let name = if subset { base[7..].to_string() } else { base };
+                let info = FontInfo { name, kind, embedded, subset, encoding };
+                if seen.insert((info.name.clone(), info.kind.clone(), info.embedded)) {
+                    out.push(info);
+                }
+            }
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+
+    fn attachment(&self, name: String, spec: &Object, source: AttachmentSource) -> Attachment {
         let d = self.dict(spec);
         let size =
             d.and_then(|d| d.get(b"EF").ok()).and_then(|o| self.dict(o)).and_then(|ef| ef.get(b"F").ok().or_else(|| ef.get(b"UF").ok())).and_then(
@@ -563,7 +683,7 @@ impl<'a> Inspector<'a> {
                 },
             );
         let display = d.and_then(|d| self.text(d, b"UF").or_else(|| self.text(d, b"F"))).unwrap_or(name);
-        Attachment { name: display, description: d.and_then(|d| self.text(d, b"Desc")), size }
+        Attachment { name: display, description: d.and_then(|d| self.text(d, b"Desc")), size, source }
     }
 }
 
@@ -620,6 +740,39 @@ fn pretty_date(s: &str) -> String {
     }
 }
 
+/// Fetch an attachment's bytes (decoded). Capped at 1 GiB to defuse decompression bombs.
+pub fn attachment_data(bytes: &[u8], password: Option<&str>, att: &Attachment) -> Result<Vec<u8>, String> {
+    let run = || -> Result<Vec<u8>, String> {
+        let options = LoadOptions { password: password.map(str::to_owned), ..LoadOptions::default() };
+        let doc = Document::load_mem_with_options(bytes, options).map_err(|e| e.to_string())?;
+        let insp = Inspector::new(&doc);
+        let spec: &Object = match &att.source {
+            AttachmentSource::Document { key } => {
+                let names = doc.catalog().ok().and_then(|c| c.get(b"Names").ok()).and_then(|o| insp.dict(o)).ok_or("no /Names")?;
+                let ef = names.get(b"EmbeddedFiles").ok().and_then(|o| insp.dict(o)).ok_or("no /EmbeddedFiles")?;
+                let mut seen = HashSet::new();
+                insp.name_tree(ef, &mut seen, 0).into_iter().find(|(k, _)| k == key).map(|(_, v)| v).ok_or("attachment not found")?
+            }
+            AttachmentSource::Annotation { page, index } => {
+                let (&pid, _) = insp.page_index.iter().find(|(_, i)| **i == *page).ok_or("page not found")?;
+                let annots = doc.get_dictionary(pid).map_err(|e| e.to_string())?.get(b"Annots").map_err(|e| e.to_string())?;
+                let a = insp.resolve(annots).as_array().map_err(|e| e.to_string())?.get(*index).ok_or("annotation not found")?;
+                insp.dict(a).and_then(|d| d.get(b"FS").ok()).ok_or("annotation has no file")?
+            }
+        };
+        let fs = insp.dict(spec).ok_or("bad file specification")?;
+        let ef = fs.get(b"EF").ok().and_then(|o| insp.dict(o)).ok_or("the file is not embedded (external reference)")?;
+        let stream = ef.get(b"UF").ok().or_else(|| ef.get(b"F").ok()).map(|o| insp.resolve(o)).ok_or("no embedded stream")?;
+        let stream = stream.as_stream().map_err(|e| e.to_string())?;
+        if stream.dict.get(b"Filter").is_ok() {
+            stream.decompressed_content_with_limit(1 << 30).map_err(|e| e.to_string())
+        } else {
+            Ok(stream.content.clone())
+        }
+    };
+    catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|p| Err(format!("reading the attachment crashed: {}", crate::raster::panic_message(&p))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,6 +784,37 @@ mod tests {
         assert_eq!(alpha(1), "a");
         assert_eq!(alpha(27), "aa");
         assert_eq!(alpha(53), "aaa");
+    }
+
+    const ATTACHMENTS: &[u8] = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles << /Names [(notes.txt) 6 0 R] >> >> >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R] /Resources << /Font << /F1 9 0 R >> >> >> endobj
+4 0 obj << /Type /Annot /Subtype /FileAttachment /Rect [10 10 30 30] /Contents (data.csv) /FS 8 0 R >> endobj
+5 0 obj << /Type /EmbeddedFile /Length 11 >> stream
+hello notes
+endstream endobj
+6 0 obj << /Type /Filespec /F (notes.txt) /UF (notes.txt) /EF << /F 5 0 R >> /Desc (Doc-level) >> endobj
+7 0 obj << /Type /EmbeddedFile /Length 5 >> stream
+a,b,c
+endstream endobj
+8 0 obj << /Type /Filespec /F (data.csv) /EF << /F 7 0 R >> >> endobj
+9 0 obj << /Type /Font /Subtype /Type1 /BaseFont /ABCDEF+Helvetica >> endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+
+    #[test]
+    fn attachments_of_both_kinds_are_listed_and_extracted() {
+        let bytes = Arc::new(ATTACHMENTS.to_vec());
+        let info = inspect(bytes.clone(), None).expect("opens");
+        let names: Vec<_> = info.attachments.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"notes.txt") && names.contains(&"data.csv"), "{names:?}");
+        for a in &info.attachments {
+            let data = attachment_data(&bytes, None, a).expect("extracts");
+            let expected: &[u8] = if a.name == "notes.txt" { b"hello notes" } else { b"a,b,c" };
+            assert_eq!(data, expected, "{}", a.name);
+        }
+        assert_eq!(info.fonts, vec![FontInfo { name: "Helvetica".into(), kind: "Type1".into(), embedded: false, subset: true, encoding: None }]);
     }
 
     #[test]

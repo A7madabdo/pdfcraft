@@ -74,23 +74,31 @@ fn all_tools(app: &mut PrintCraftApp, ui: &mut egui::Ui, t: &Tokens) {
 
 fn tool_row(ui: &mut egui::Ui, t: &Tokens, g: &ToolGroup) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, g.label));
     if resp.hovered() {
         ui.painter().rect_filled(rect, CornerRadius::same(6), t.hover);
     }
     icons::paint(ui, Rect::from_min_size(rect.min + vec2(6.0, 7.0), vec2(20.0, 20.0)), g.icon, 19.0, hue(g));
     ui.painter().text(rect.left_center() + vec2(36.0, 0.0), Align2::LEFT_CENTER, g.label, theme::regular(13.5), t.text);
-    let (chip, fill) = match (g.badge, g.availability) {
-        (Some(b), _) => (Some(b.to_string()), t.badge_new),
-        (None, Availability::Planned(m)) => (Some(m.to_string()), t.pressed),
-        _ => (None, t.pressed),
-    };
-    if let Some(c) = chip {
-        let font = theme::semibold(9.5);
-        let fg = if fill == t.badge_new { Color32::WHITE } else { t.text_muted };
-        let w = ui.fonts_mut(|f| f.layout_no_wrap(c.clone(), font.clone(), fg).size().x);
-        let r = Rect::from_center_size(rect.right_center() - vec2(w / 2.0 + 10.0, 0.0), vec2(w + 10.0, 16.0));
-        ui.painter().rect_filled(r, CornerRadius::same(4), fill);
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, c, font, fg);
+    match (g.badge, g.availability) {
+        (Some(b), _) => {
+            let font = theme::semibold(9.5);
+            let w = ui.fonts_mut(|f| f.layout_no_wrap(b.to_string(), font.clone(), Color32::WHITE).size().x);
+            let r = Rect::from_center_size(rect.right_center() - vec2(w / 2.0 + 10.0, 0.0), vec2(w + 10.0, 16.0));
+            ui.painter().rect_filled(r, CornerRadius::same(4), t.badge_new);
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, b, font, Color32::WHITE);
+        }
+        // Planned tools: a quiet milestone hint instead of a chip, so the list stays calm.
+        (None, Availability::Planned(m)) if resp.hovered() => {
+            ui.painter().text(
+                rect.right_center() - vec2(10.0, 0.0),
+                Align2::RIGHT_CENTER,
+                format!("Planned · {m}"),
+                theme::medium(10.5),
+                t.text_faint,
+            );
+        }
+        _ => {}
     }
     let tip = match g.availability {
         Availability::Ready => "Available".to_string(),
@@ -123,6 +131,7 @@ fn tool_detail(app: &mut PrintCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'stat
             widgets::section_title(ui, s.title);
             for item in s.items {
                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, item.label));
                 let ready = item.availability == Availability::Ready;
                 if resp.hovered() {
                     ui.painter().rect_filled(rect, CornerRadius::same(6), t.hover);
@@ -170,7 +179,8 @@ pub fn right_panel(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
     let Some(panel) = app.right else { return };
     let mut nav: Option<Nav> = None;
     let mut close = false;
-    let mut layer_toast = false;
+    let mut toggle_layer: Option<(usize, bool)> = None;
+    let mut attachment_action: Option<(usize, bool)> = None; // (index, open instead of save)
     {
         let Some(doc) = app.session.get(id) else { return };
         let info = &doc.info;
@@ -222,8 +232,9 @@ pub fn right_panel(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
                         if info.layers.is_empty() {
                             empty(ui, &t, "layers", "This document has no layers.");
                         }
-                        for l in &info.layers {
+                        for (li, l) in info.layers.iter().enumerate() {
                             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
+                            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, l.visible, &l.name));
                             if resp.hovered() {
                                 ui.painter().rect_filled(rect, CornerRadius::same(6), t.hover);
                             }
@@ -234,9 +245,10 @@ pub fn right_panel(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
                                 16.0,
                                 t.icon,
                             );
-                            ui.painter().text(rect.left_center() + vec2(32.0, 0.0), Align2::LEFT_CENTER, &l.name, theme::regular(13.0), t.text);
-                            if resp.clicked() {
-                                layer_toast = true;
+                            let fg = if l.visible { t.text } else { t.text_faint };
+                            ui.painter().text(rect.left_center() + vec2(32.0, 0.0), Align2::LEFT_CENTER, &l.name, theme::regular(13.0), fg);
+                            if resp.on_hover_text(if l.visible { "Hide layer" } else { "Show layer" }).clicked() {
+                                toggle_layer = Some((li, !l.visible));
                             }
                         }
                     }
@@ -244,19 +256,34 @@ pub fn right_panel(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
                         if info.attachments.is_empty() {
                             empty(ui, &t, "paperclip", "This document has no attachments.");
                         }
-                        for a in &info.attachments {
-                            ui.horizontal(|ui| {
-                                ui.add(icons::image("paperclip", 16.0, t.icon));
-                                ui.vertical(|ui| {
-                                    ui.label(egui::RichText::new(&a.name).font(theme::medium(13.0)));
-                                    let mut meta = a.size.map(human_size).unwrap_or_default();
-                                    if let Some(d) = &a.description {
-                                        meta = format!("{meta}  ·  {d}");
-                                    }
-                                    ui.label(egui::RichText::new(meta).color(t.text_faint).small());
+                        for (ai, a) in info.attachments.iter().enumerate() {
+                            egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 6)).show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.add(icons::image("paperclip", 16.0, t.icon));
+                                    ui.vertical(|ui| {
+                                        ui.set_width(ui.available_width() - 70.0);
+                                        ui.add(egui::Label::new(egui::RichText::new(&a.name).font(theme::medium(13.0))).truncate());
+                                        let mut meta = a.size.map(human_size).unwrap_or_default();
+                                        if let printcraft_render::AttachmentSource::Annotation { page, .. } = a.source {
+                                            meta = format!("{meta}  ·  on page {}", info.pages.get(page).map(|p| p.label.as_str()).unwrap_or("?"));
+                                        }
+                                        if let Some(d) = &a.description {
+                                            meta = format!("{meta}  ·  {d}");
+                                        }
+                                        ui.add(egui::Label::new(egui::RichText::new(meta).color(t.text_faint).small()).truncate());
+                                    });
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if icons::button(ui, "file-down", 28.0, false, "Save attachment…").clicked() {
+                                            attachment_action = Some((ai, false));
+                                        }
+                                        if a.name.to_lowercase().ends_with(".pdf")
+                                            && icons::button(ui, "file-input", 28.0, false, "Open in a new tab").clicked()
+                                        {
+                                            attachment_action = Some((ai, true));
+                                        }
+                                    });
                                 });
                             });
-                            ui.add_space(6.0);
                         }
                     }
                 });
@@ -265,8 +292,13 @@ pub fn right_panel(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
     if close {
         app.right = None;
     }
-    if layer_toast {
-        app.notify("Toggling layer visibility re-renders with optional content states — ships with the M2 renderer device");
+    if let Some((ai, open)) = attachment_action {
+        app.attachment_action(id, ai, open);
+    }
+    if let Some((layer, visible)) = toggle_layer
+        && app.session.set_layer_visible(id, layer, visible)
+    {
+        app.views[index].invalidate_content();
     }
     match nav {
         Some(Nav::Page(p)) => app.views[index].go_to_page(p),
@@ -336,50 +368,86 @@ fn comments(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, nav: &mut Option<Nav>
     }
 }
 
+/// Reader-friendly names for annotation subtypes (the PDF names are shown in tooltips).
+fn subtype_label(s: &str) -> &str {
+    match s {
+        "Text" => "Note",
+        "FreeText" => "Text box",
+        "StrikeOut" => "Strikethrough",
+        "Square" => "Rectangle",
+        "Circle" => "Oval",
+        "Ink" => "Drawing",
+        "PolyLine" => "Polyline",
+        "FileAttachment" => "Attachment",
+        "Caret" => "Insert text",
+        other => other,
+    }
+}
+
+/// Darken very light annotation colours (e.g. note yellow) so their icon stays legible.
+fn legible(c: Color32, t: &Tokens) -> Color32 {
+    let lum = 0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32;
+    if !t.dark() && lum > 170.0 {
+        Color32::from_rgb((c.r() as f32 * 0.62) as u8, (c.g() as f32 * 0.62) as u8, (c.b() as f32 * 0.62) as u8)
+    } else {
+        c
+    }
+}
+
 fn comment_card(ui: &mut egui::Ui, t: &Tokens, a: &Annotation, replies: &[&Annotation]) -> egui::Response {
-    let accent = a.color.map(|c| Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)).unwrap_or(t.accent);
+    let color = a.color.map(|c| Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)).unwrap_or(t.accent);
+    let id = ui.id().with(("comment", a.page, a.rect[0].to_bits(), a.rect[1].to_bits()));
+    let hovered = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
     let resp = egui::Frame::NONE
-        .fill(t.card)
-        .stroke(Stroke::new(1.0, t.divider))
+        .fill(if hovered { t.hover } else { Color32::TRANSPARENT })
         .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::same(10))
+        .inner_margin(egui::Margin { left: 8, right: 8, top: 10, bottom: 10 })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
-                ui.painter().circle_filled(r.center(), 13.0, accent.gamma_multiply(0.22));
-                icons::paint(ui, r, subtype_icon(&a.subtype), 14.0, accent.gamma_multiply(1.0));
+                let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
+                ui.painter().circle_filled(r.center(), 14.0, color.gamma_multiply(if t.dark() { 0.35 } else { 0.28 }));
+                icons::paint(ui, r, subtype_icon(&a.subtype), 14.0, legible(color, t));
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(egui::RichText::new(a.author.as_deref().unwrap_or("Unknown author")).font(theme::semibold(13.0)));
-                    let meta = format!("{}{}", a.subtype, a.modified.as_deref().map(|m| format!("  ·  {m}")).unwrap_or_default());
-                    ui.label(egui::RichText::new(meta).color(t.text_faint).font(theme::regular(11.0)));
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(a.author.as_deref().unwrap_or("Unknown author")).font(theme::semibold(13.0))).truncate(),
+                    );
+                    let meta = format!("{}{}", subtype_label(&a.subtype), a.modified.as_deref().map(|m| format!("  ·  {m}")).unwrap_or_default());
+                    ui.add(egui::Label::new(egui::RichText::new(meta).color(t.text_faint).font(theme::regular(11.0))).truncate());
                 });
             });
-            if let Some(c) = &a.contents {
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(c).color(t.text));
-            }
-            for r in replies {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    let (bar, _) = ui.allocate_exact_size(vec2(2.0, 30.0), Sense::hover());
-                    ui.painter().rect_filled(bar, CornerRadius::same(1), t.divider);
-                    ui.vertical(|ui| {
+            // Body and replies are indented under the avatar and must wrap to the panel width.
+            egui::Frame::NONE.inner_margin(egui::Margin { left: 36, right: 0, top: 4, bottom: 0 }).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                if let Some(c) = &a.contents {
+                    ui.add(egui::Label::new(egui::RichText::new(c).color(t.text)).wrap());
+                }
+                for r in replies {
+                    ui.add_space(6.0);
+                    let resp = egui::Frame::NONE.inner_margin(egui::Margin { left: 10, right: 0, top: 2, bottom: 2 }).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 1.0;
-                        ui.label(egui::RichText::new(r.author.as_deref().unwrap_or("Reply")).font(theme::semibold(12.0)));
+                        ui.add(egui::Label::new(egui::RichText::new(r.author.as_deref().unwrap_or("Reply")).font(theme::semibold(12.0))).truncate());
                         if let Some(c) = &r.contents {
-                            ui.label(egui::RichText::new(c).color(t.text_muted).font(theme::regular(12.0)));
+                            ui.add(egui::Label::new(egui::RichText::new(c).color(t.text_muted).font(theme::regular(12.0))).wrap());
                         }
                     });
-                });
-            }
+                    let b = resp.response.rect;
+                    ui.painter().vline(b.left() + 1.0, b.y_range(), Stroke::new(2.0, t.border));
+                }
+            });
         })
         .response;
-    ui.add_space(6.0);
-    ui.interact(resp.rect, ui.id().with(("comment", a.page, a.rect[0].to_bits(), a.rect[1].to_bits())), Sense::click())
+    let div_y = resp.rect.bottom() + 2.0;
+    ui.painter().hline(resp.rect.x_range().shrink(8.0), div_y, Stroke::new(1.0, t.divider));
+    ui.add_space(5.0);
+    let click = ui
+        .interact(resp.rect, id.with("click"), Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!("/{} annotation — click to show it on the page", a.subtype));
+    ui.data_mut(|d| d.insert_temp(id, click.hovered()));
+    click
 }
 
 fn outline_item(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, item: &OutlineItem, depth: usize, nav: &mut Option<Nav>) {
@@ -391,6 +459,7 @@ fn outline_item(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, item: &OutlineIte
     let galley = ui.fonts_mut(|f| f.layout(item.title.clone(), font, t.text, wrap_w));
     let h = (galley.size().y + 12.0).max(28.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &item.title));
     if resp.hovered() {
         ui.painter().rect_filled(rect, CornerRadius::same(6), t.hover);
     }
@@ -425,6 +494,7 @@ fn pages(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, view: &crate::DocView, n
         ui.vertical_centered(|ui| {
             let h = w * p.height / p.width.max(1.0);
             let (rect, resp) = ui.allocate_exact_size(vec2(w + 16.0, h + 16.0), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Page {}", p.label)));
             let selected = i == view.current;
             if selected {
                 ui.painter().rect_filled(rect, CornerRadius::same(8), t.accent_soft);
@@ -475,6 +545,7 @@ fn fields(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, nav: &mut Option<Nav>) 
                 FieldKind::Unknown => "square",
             };
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &f.name));
             if resp.hovered() {
                 ui.painter().rect_filled(rect, CornerRadius::same(6), t.hover);
             }

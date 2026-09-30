@@ -59,13 +59,7 @@ pub fn build(doc: &mut Document, annotator: &mut Annotator, inputs: FormInputs<'
     });
     label(&mut c, COL2, row2 + 24.0, "Amount  (AFNumber_Format, right-aligned)");
     b.text_field("amount", "Amount in US dollars", Rect::new(COL2, row2, RIGHT, row2 + 20.0), "1234.5", Some("$1,234.50"), 2, |d| {
-        d.set(
-            "AA",
-            js_actions(
-                "AFNumber_Format(2, 0, 0, 0, \"$\", true);",
-                "AFNumber_Keystroke(2, 0, 0, 0, \"$\", true);",
-            ),
-        );
+        d.set("AA", js_actions("AFNumber_Format(2, 0, 0, 0, \"$\", true);", "AFNumber_Keystroke(2, 0, 0, 0, \"$\", true);"));
     });
 
     label(&mut c, LEFT, 510.0, "Comments  (multiline)");
@@ -77,11 +71,8 @@ pub fn build(doc: &mut Document, annotator: &mut Annotator, inputs: FormInputs<'
 
     // --- Preferences -----------------------------------------------------------
     section(&mut c, 418.0, "Preferences");
-    let checks = [
-        ("subscribe", "Subscribe to release notes", true),
-        ("license", "I have read the licence", true),
-        ("stickers", "Send me stickers", false),
-    ];
+    let checks =
+        [("subscribe", "Subscribe to release notes", true), ("license", "I have read the licence", true), ("stickers", "Send me stickers", false)];
     for (i, (field, caption, on)) in checks.into_iter().enumerate() {
         let y = 382.0 - i as f32 * 20.0;
         b.checkbox(field, caption, Rect::xywh(LEFT, y, 12.0, 12.0), on);
@@ -112,13 +103,7 @@ pub fn build(doc: &mut Document, annotator: &mut Annotator, inputs: FormInputs<'
         Rect::new(LEFT, 184.0, 250.0, 206.0),
         "app.alert(\"Hello from the PrintCraft showcase! This alert is a JavaScript action on a push button.\", 3);",
     );
-    c.fill_color(colors::INK_3).text(
-        Font::Helv,
-        7.0,
-        LEFT,
-        172.0,
-        "JavaScript: shows app.alert(...) in viewers that run document scripts.",
-    );
+    c.fill_color(colors::INK_3).text(Font::Helv, 7.0, LEFT, 172.0, "JavaScript: shows app.alert(...) in viewers that run document scripts.");
     label(&mut c, COL2, 212.0, "Signature  (unsigned /Sig field)");
     b.signature("signature", "Approver signature", Rect::new(COL2, 150.0, RIGHT, 206.0));
 
@@ -144,7 +129,12 @@ pub fn build(doc: &mut Document, annotator: &mut Annotator, inputs: FormInputs<'
     // --- Page object -------------------------------------------------------------
     let mut annots = b.widgets.clone();
     let fields = b.fields.clone();
-    annots.push(annotator.link(b.doc, page, Rect::new(COL2 - 1.0, link_y - 5.0, COL2 + back_w + 1.0, link_y + 9.0), LinkTarget::Page(inputs.contents_page)));
+    annots.push(annotator.link(
+        b.doc,
+        page,
+        Rect::new(COL2 - 1.0, link_y - 5.0, COL2 + back_w + 1.0, link_y + 9.0),
+        LinkTarget::Page(inputs.contents_page),
+    ));
     annots.push(annotator.link(b.doc, page, Rect::new(COL2 - 1.0, link_y - 21.0, COL2 + visit_w + 1.0, link_y - 7.0), LinkTarget::Uri(visit)));
     annots.push(annotator.simple_note(
         b.doc,
@@ -184,7 +174,7 @@ fn draw_page_chrome(c: &mut Content, folio: &str) {
 
     c.fill_color(colors::ACCENT).tracked_text(Font::HelvBold, 7.5, LEFT, 722.0, 1.8, "CHAPTER TEN");
     c.fill_color(colors::INK).text(Font::Times, 34.0, LEFT, 686.0, "Interactive");
-    let w = Font::Times.width("Interactive ", 34.0);
+    let w = Font::Times.width("Interactive", 34.0) + 12.0;
     c.fill_color(colors::ACCENT).text(Font::TimesItalic, 34.0, LEFT + w, 686.0, "Form");
     c.fill_color(colors::INK_2);
     c.text(Font::TimesItalic, 13.0, LEFT, 660.0, "This page was not printed by Chrome: the xtask writes its content stream and");

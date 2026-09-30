@@ -12,5 +12,10 @@ workspace = true
 hayro = { workspace = true }
 hayro-syntax = { workspace = true }
 lopdf = { workspace = true }
+kurbo = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+
+# lopdf (bootstrap) draws random bytes for encryption; on the web they come from the browser.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }

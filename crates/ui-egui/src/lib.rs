@@ -8,6 +8,7 @@
 mod canvas;
 mod chrome;
 mod dialogs;
+mod editing;
 mod home;
 mod icon_data;
 pub mod icons;
@@ -19,6 +20,7 @@ mod widgets;
 use printcraft_engine::{DocId, Session};
 
 pub use canvas::DocView;
+pub use editing::{CloseRequest, SaveTarget};
 use theme::ThemeKind;
 
 /// Top-level workspace modes (Acrobat's mode bar).
@@ -67,9 +69,22 @@ pub enum Dialog {
 pub enum PropsTab {
     Description,
     Security,
+    Fonts,
     Advanced,
 }
 
+/// Files delivered asynchronously: (name, bytes).
+pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
+pub struct PasswordPrompt {
+    pub name: String,
+    pub path: Option<String>,
+    pub bytes: std::sync::Arc<Vec<u8>>,
+    pub input: String,
+    pub error: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RecentFile {
     pub name: String,
     pub path: String,
@@ -96,6 +111,17 @@ pub struct PrintCraftApp {
     pub toast: Option<(String, f64)>,
     /// Whether the macOS title bar is drawn by us (traffic lights over our tab strip).
     pub integrated_titlebar: bool,
+    pub password_prompt: Option<PasswordPrompt>,
+    pub full_screen: bool,
+    /// Files delivered asynchronously (web drag-and-drop, web file picker).
+    pub inbox: Inbox,
+    /// A pending "save changes?" question (closing a dirty tab or quitting).
+    pub close_request: Option<CloseRequest>,
+    /// Save to this path instead of asking (tests and automation).
+    pub save_override: Option<String>,
+    /// Document Properties ▸ Description fields being edited: (document, Title/Author/Subject/Keywords).
+    pub props_draft: Option<(DocId, [String; 4])>,
+    allow_quit: bool,
     pending_theme: Option<ThemeKind>,
     styled: bool,
     fonts_ready: bool,
@@ -126,16 +152,37 @@ impl PrintCraftApp {
             recent: Vec::new(),
             toast: None,
             integrated_titlebar: false,
+            password_prompt: None,
+            full_screen: false,
+            inbox: Default::default(),
+            close_request: None,
+            save_override: None,
+            props_draft: None,
+            allow_quit: false,
             pending_theme: None,
             styled: false,
             fonts_ready: false,
         }
     }
 
-    /// Open a document and make it the active tab.
+    /// Open a document and make it the active tab. Encrypted files raise the password prompt.
     pub fn open_bytes(&mut self, name: &str, path: Option<String>, bytes: Vec<u8>) -> Result<(), String> {
+        self.try_open(name, path, std::sync::Arc::new(bytes), None)
+    }
+
+    fn try_open(&mut self, name: &str, path: Option<String>, bytes: std::sync::Arc<Vec<u8>>, password: Option<&str>) -> Result<(), String> {
+        use printcraft_render::OpenError;
         let size = bytes.len();
-        let id = self.session.open(name, path.clone(), bytes).map_err(|e| e.to_string())?;
+        let id = match self.session.open(name, path.clone(), bytes.clone(), password) {
+            Ok(id) => id,
+            Err(e @ (OpenError::NeedsPassword | OpenError::WrongPassword)) => {
+                let error = matches!(e, OpenError::WrongPassword).then(|| "Incorrect password. Try again.".to_string());
+                self.password_prompt = Some(PasswordPrompt { name: name.to_string(), path, bytes, input: String::new(), error });
+                return Ok(());
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        self.password_prompt = None;
         let doc = self.session.get(id).expect("just opened");
         let pages = doc.info.pages.len();
         // Acrobat opens straight to the Comments panel when a document has comments.
@@ -159,6 +206,81 @@ impl PrintCraftApp {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn open_dropped(&mut self, f: egui::DroppedFileHandle, _ctx: &egui::Context) {
+        let p = f.path().to_string_lossy().into_owned();
+        if !p.is_empty() && f.path().is_absolute() {
+            self.open_path(&p);
+            return;
+        }
+        let name = f.path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dropped.pdf".into());
+        match f.bytes() {
+            Ok(bytes) => {
+                if let Err(e) = self.open_bytes(&name, None, bytes) {
+                    self.notify(format!("Couldn't open {name}: {e}"));
+                }
+            }
+            Err(e) => self.notify(format!("Couldn't read {name}: {e}")),
+        }
+    }
+
+    /// Browsers read dropped files asynchronously; the bytes land in `inbox` and open next frame.
+    #[cfg(target_arch = "wasm32")]
+    fn open_dropped(&mut self, f: egui::DroppedFileHandle, ctx: &egui::Context) {
+        let inbox = self.inbox.clone();
+        let ctx = ctx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let name = f.path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dropped.pdf".into());
+            if let Ok(bytes) = f.bytes_async().await
+                && let Ok(mut q) = inbox.lock()
+            {
+                q.push((name, bytes));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Save an attachment to disk, or open a PDF attachment in a new tab.
+    pub fn attachment_action(&mut self, doc: DocId, index: usize, open: bool) {
+        let Some(d) = self.session.get(doc) else { return };
+        let Some(att) = d.info.attachments.get(index).cloned() else { return };
+        let data = printcraft_render::attachment_data(&d.bytes, d.password.as_deref(), &att);
+        match (data, open) {
+            (Err(e), _) => self.notify(format!("Couldn't read {}: {e}", att.name)),
+            (Ok(bytes), true) => {
+                if let Err(e) = self.open_bytes(&att.name, None, bytes) {
+                    self.notify(format!("Couldn't open {}: {e}", att.name));
+                }
+            }
+            (Ok(bytes), false) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(path) = rfd::FileDialog::new().set_file_name(&att.name).save_file() {
+                    match std::fs::write(&path, &bytes) {
+                        Ok(()) => self.notify(format!("Saved {}", path.display())),
+                        Err(e) => self.notify(format!("Couldn't save: {e}")),
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                self.notify(format!("Downloading attachments on the web arrives with M3.10 ({} bytes ready)", bytes.len()));
+            }
+        }
+    }
+
+    /// Enter or leave full-screen reading (Acrobat: View ▸ Full Screen Mode, ⌘L).
+    pub fn set_full_screen(&mut self, ctx: &egui::Context, on: bool) {
+        self.full_screen = on;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+    }
+
+    /// Answer the password prompt (`None` cancels).
+    pub fn submit_password(&mut self, password: Option<String>) {
+        let Some(p) = self.password_prompt.take() else { return };
+        let Some(pw) = password else { return };
+        if let Err(e) = self.try_open(&p.name, p.path, p.bytes, Some(&pw)) {
+            self.notify(format!("Couldn't open {}: {e}", p.name));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path(&mut self, path: &str) {
         let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string());
         match std::fs::read(path) {
@@ -175,6 +297,19 @@ impl PrintCraftApp {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(p) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).pick_file() {
             self.open_path(&p.to_string_lossy());
+        }
+        // Browsers pick files asynchronously; the bytes arrive through `inbox`.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let inbox = self.inbox.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Some(h) = rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]).pick_file().await {
+                    let bytes = h.read().await;
+                    if let Ok(mut q) = inbox.lock() {
+                        q.push((h.file_name(), bytes));
+                    }
+                }
+            });
         }
     }
 
@@ -233,6 +368,30 @@ impl PrintCraftApp {
         }
     }
 
+    /// Serialize the user's persistent state (recent files, theme). Local only.
+    pub fn persist(&self) -> String {
+        serde_json::json!({ "recent": self.recent, "theme": self.theme }).to_string()
+    }
+
+    /// Restore state written by `persist`. Unknown or malformed data is ignored.
+    pub fn restore(&mut self, json: &str) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return };
+        if let Ok(r) = serde_json::from_value::<Vec<RecentFile>>(v["recent"].clone()) {
+            // Only keep entries whose files still exist.
+            #[cfg(not(target_arch = "wasm32"))]
+            let r: Vec<RecentFile> = r.into_iter().filter(|f| std::path::Path::new(&f.path).exists()).collect();
+            self.recent = r;
+        }
+        if let Ok(t) = serde_json::from_value::<ThemeKind>(v["theme"].clone()) {
+            self.theme = t;
+        }
+    }
+
+    /// `true` while any open document still waits for page renders (used by headless capture).
+    pub fn render_pending(&self) -> bool {
+        self.views.iter().any(|v| v.render_pending())
+    }
+
     /// Apply a named view option (`--page 3`, `--panel bookmarks`, `--theme dark`, …).
     ///
     /// This is the seed of the UI control channel (M3.9): the same verbs become `ui.set` calls.
@@ -289,8 +448,37 @@ impl PrintCraftApp {
                 }
             }
             ("organize", Some(v)) => v.organize = value != "off",
+            ("rotate", Some(v)) => {
+                let deg: u16 = value.parse().map_err(|_| "rotate: 0, 90, 180 or 270")?;
+                if !deg.is_multiple_of(90) {
+                    return Err("rotate: 0, 90, 180 or 270".into());
+                }
+                v.rotation = deg % 360;
+            }
+            ("layer", _) => {
+                // `--layer "Name=off"` / `"Name=on"`
+                let (name, state) = value.rsplit_once('=').ok_or("expected NAME=on|off")?;
+                let (i, id) = self.active_ids().ok_or("`layer` needs an open document")?;
+                let idx = self
+                    .session
+                    .get(id)
+                    .and_then(|d| d.info.layers.iter().position(|l| l.name == name))
+                    .ok_or_else(|| format!("no layer named {name}"))?;
+                if self.session.set_layer_visible(id, idx, state != "off") {
+                    self.views[i].invalidate_content();
+                }
+            }
+            ("find", Some(v)) => {
+                v.open_find();
+                if let Some(f) = v.find.as_mut() {
+                    f.query = value.to_string();
+                }
+                v.rerun_find();
+            }
             ("fields", Some(v)) => v.highlight_fields = value != "off",
-            (k, None) if ["page", "zoom", "layout", "organize", "fields"].contains(&k) => return Err(format!("`{k}` needs an open document")),
+            (k, None) if ["page", "zoom", "layout", "organize", "fields", "find", "rotate"].contains(&k) => {
+                return Err(format!("`{k}` needs an open document"));
+            }
             (other, _) => return Err(format!("unknown option {other}")),
         }
         Ok(())
@@ -312,7 +500,28 @@ impl PrintCraftApp {
         if pressed(cmd(Key::W))
             && let Some(i) = self.active
         {
-            self.close_tab(i);
+            self.request_close_tab(i);
+        }
+        if pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S)) && self.active.is_some() {
+            self.save_active(SaveTarget::As);
+        }
+        if pressed(cmd(Key::S)) && self.active.is_some() {
+            self.save_active(SaveTarget::InPlace);
+        }
+        // Text fields keep their own undo; otherwise ⌘Z/⇧⌘Z step the document history.
+        if !ctx.egui_wants_keyboard_input() && self.active.is_some() {
+            if pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)) {
+                self.redo();
+            } else if pressed(cmd(Key::Z)) {
+                self.undo();
+            }
+        }
+        if pressed(cmd(Key::L)) && self.active.is_some() {
+            let on = !self.full_screen;
+            self.set_full_screen(ctx, on);
+        }
+        if self.full_screen && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.set_full_screen(ctx, false);
         }
         if pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::CTRL, Key::H)) {
             self.mode = if self.mode == Mode::Read { Mode::AllTools } else { Mode::Read };
@@ -324,6 +533,10 @@ impl PrintCraftApp {
 }
 
 impl eframe::App for PrintCraftApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string("printcraft", self.persist());
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if !self.styled {
             egui_extras::install_image_loaders(ctx);
@@ -338,25 +551,17 @@ impl eframe::App for PrintCraftApp {
         }
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for f in dropped {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let p = f.path().to_string_lossy().into_owned();
-                if !p.is_empty() {
-                    self.open_path(&p);
-                    continue;
-                }
-            }
-            let name = f.path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dropped.pdf".into());
-            match f.bytes() {
-                Ok(bytes) => {
-                    if let Err(e) = self.open_bytes(&name, None, bytes) {
-                        self.notify(format!("Couldn't open {name}: {e}"));
-                    }
-                }
-                Err(e) => self.notify(format!("Couldn't read {name}: {e}")),
+            self.open_dropped(f, ctx);
+        }
+        let arrived: Vec<(String, Vec<u8>)> = self.inbox.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+        for (name, bytes) in arrived {
+            if let Err(e) = self.open_bytes(&name, None, bytes) {
+                self.notify(format!("Couldn't open {name}: {e}"));
             }
         }
+        self.guard_quit(ctx);
         self.shortcuts(ctx);
+        self.process_pending_edits();
         // Pull finished renders into textures for every open document.
         for view in &mut self.views {
             if let Some(doc) = self.session.get(view.id) {
@@ -370,6 +575,20 @@ impl eframe::App for PrintCraftApp {
         // Fonts registered via set_fonts only take effect next frame; named families would panic now.
         if !self.fonts_ready {
             ctx.request_repaint();
+            return;
+        }
+        if self.full_screen && self.active.is_some() {
+            // Full screen: the page, nothing else (Esc or ⌘L to leave).
+            let t = theme::Tokens::get(&ctx);
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(if t.dark() { t.pasteboard } else { egui::Color32::from_gray(32) })).show(
+                ui,
+                |ui| {
+                    if let Some(i) = self.active {
+                        canvas::document_area(self, i, ui);
+                    }
+                },
+            );
+            dialogs::show(self, &ctx);
             return;
         }
         chrome::tab_strip(self, ui);
@@ -388,6 +607,7 @@ impl eframe::App for PrintCraftApp {
             None => home::show(self, ui),
             Some(i) => canvas::document_area(self, i, ui),
         });
+        self.process_pending_edits();
         palette::show(self, &ctx);
         dialogs::show(self, &ctx);
         widgets::toast(self, &ctx);

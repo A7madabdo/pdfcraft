@@ -30,13 +30,13 @@ pub fn tab_strip(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
                 let mut close = None;
                 for i in 0..app.views.len() {
                     let Some(doc) = app.session.get(app.views[i].id) else { continue };
-                    let name = doc.name.clone();
-                    if tab(ui, &t, &name, app.active == Some(i), &mut close, i).clicked() {
+                    let (name, dirty) = (doc.name.clone(), doc.dirty);
+                    if tab(ui, &t, &name, dirty, app.active == Some(i), &mut close, i).clicked() {
                         app.active = Some(i);
                     }
                 }
                 if let Some(i) = close {
-                    app.close_tab(i);
+                    app.request_close_tab(i);
                 }
                 ui.add_space(4.0);
                 if widgets::ghost_button(ui, "plus", "Open").on_hover_text("Open a PDF (⌘O)").clicked() {
@@ -59,11 +59,13 @@ pub fn tab_strip(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
         });
 }
 
-fn tab(ui: &mut egui::Ui, t: &Tokens, name: &str, active: bool, close: &mut Option<usize>, index: usize) -> egui::Response {
+fn tab(ui: &mut egui::Ui, t: &Tokens, name: &str, dirty: bool, active: bool, close: &mut Option<usize>, index: usize) -> egui::Response {
     let font = theme::regular(13.0);
     let label: String = if name.chars().count() > 28 { format!("{}…", name.chars().take(27).collect::<String>()) } else { name.to_string() };
     let text_w = ui.fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), t.text).size().x);
     let (rect, resp) = ui.allocate_exact_size(vec2(text_w + 64.0, 30.0), Sense::click());
+    let a11y = if dirty { format!("{name} (edited)") } else { name.to_string() };
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, active, &a11y));
     let bg = if active {
         t.chrome
     } else if resp.hovered() {
@@ -85,13 +87,16 @@ fn tab(ui: &mut egui::Ui, t: &Tokens, name: &str, active: bool, close: &mut Opti
     if x.hovered() {
         ui.painter().rect_filled(x_rect, CornerRadius::same(4), t.pressed);
     }
-    if active || resp.hovered() || x.hovered() {
+    // Unsaved changes: a dot where the close button sits, until the tab is hovered.
+    if dirty && !resp.hovered() && !x.hovered() {
+        ui.painter().circle_filled(x_rect.center(), 4.0, if active { t.text } else { t.text_muted });
+    } else if active || resp.hovered() || x.hovered() {
         icons::paint(ui, x_rect, "x", 13.0, t.text_muted);
     }
     if x.clicked() {
         *close = Some(index);
     }
-    resp.on_hover_text(name)
+    resp.on_hover_text(if dirty { format!("{name} — unsaved changes") } else { name.to_string() })
 }
 
 pub fn mode_bar(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
@@ -156,11 +161,41 @@ fn main_menu(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
             if ui.add_enabled(has, egui::Button::new("Close file").shortcut_text("⌘W")).clicked()
                 && let Some(i) = app.active
             {
-                app.close_tab(i);
+                app.request_close_tab(i);
+            }
+            let dirty = app.active_ids().and_then(|(_, id)| app.session.get(id)).is_some_and(|d| d.dirty);
+            if ui.add_enabled(has && dirty, egui::Button::new("Save").shortcut_text("⌘S")).clicked() {
+                app.save_active(crate::SaveTarget::InPlace);
+            }
+            if ui.add_enabled(has, egui::Button::new("Save as…").shortcut_text("⇧⌘S")).clicked() {
+                app.save_active(crate::SaveTarget::As);
+            }
+            ui.separator();
+            if ui.add_enabled(has, egui::Button::new("Find…").shortcut_text("⌘F")).clicked()
+                && let Some(i) = app.active
+            {
+                app.views[i].open_find();
             }
             ui.separator();
             if ui.add_enabled(has, egui::Button::new("Document properties…").shortcut_text("⌘D")).clicked() {
                 app.dialog = Some(Dialog::Properties(PropsTab::Description));
+            }
+        });
+        ui.menu_button("Edit", |ui| {
+            let doc = app.active_ids().and_then(|(_, id)| app.session.get(id));
+            let undo = doc.and_then(|d| d.can_undo()).map(str::to_owned);
+            let redo = doc.and_then(|d| d.can_redo()).map(str::to_owned);
+            let label = |verb: &str, what: &Option<String>| what.as_ref().map(|w| format!("{verb} {w}")).unwrap_or_else(|| verb.to_string());
+            if ui.add_enabled(undo.is_some(), egui::Button::new(label("Undo", &undo)).shortcut_text("⌘Z")).clicked() {
+                app.undo();
+            }
+            if ui.add_enabled(redo.is_some(), egui::Button::new(label("Redo", &redo)).shortcut_text("⇧⌘Z")).clicked() {
+                app.redo();
+            }
+            ui.separator();
+            let has = app.active.is_some();
+            if ui.add_enabled(has, egui::Button::new("Organize pages")).clicked() {
+                app.run_command("page.organize");
             }
         });
         ui.menu_button("View", |ui| {
@@ -182,6 +217,12 @@ fn main_menu(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
                 if widgets::menu_item(ui, "Zoom out", "⌘−").clicked() {
                     v.zoom_step(false);
                 }
+                if widgets::menu_item(ui, "Rotate view clockwise", "⇧⌘+").clicked() {
+                    v.rotate_view(true);
+                }
+                if widgets::menu_item(ui, "Rotate view counterclockwise", "⇧⌘−").clicked() {
+                    v.rotate_view(false);
+                }
                 ui.separator();
                 ui.label(egui::RichText::new("Page display").color(t.text_faint).small());
                 for (l, label) in
@@ -193,6 +234,10 @@ fn main_menu(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
                     }
                 }
                 ui.separator();
+            }
+            if app.active.is_some() && widgets::menu_item(ui, "Full screen mode", "⌘L").clicked() {
+                let ctx = ui.ctx().clone();
+                app.set_full_screen(&ctx, true);
             }
             if widgets::menu_item(ui, "Read mode", "⌃⌘H").clicked() {
                 app.mode = if app.mode == Mode::Read { Mode::AllTools } else { Mode::Read };
@@ -277,6 +322,9 @@ pub fn right_rail(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
                 }
                 if icons::button(ui, "zoom-in", 32.0, false, "Zoom in (⌘+)").clicked() {
                     view.zoom_step(true);
+                }
+                if icons::button(ui, "rotate-cw", 32.0, false, "Rotate view clockwise (⇧⌘+)").clicked() {
+                    view.rotate_view(true);
                 }
                 let fit_icon = if view.fit == Fit::Width { "maximize" } else { "columns-2" };
                 if icons::button(ui, fit_icon, 32.0, false, "Toggle fit page / fit width").clicked() {

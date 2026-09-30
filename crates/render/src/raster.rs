@@ -1,9 +1,14 @@
 //! Background page rasterization.
 //!
 //! A `RenderPool` owns N worker threads. Each worker parses the shared bytes once (hayro's parser
-//! is lazy, so this is cheap) and keeps its own render cache. Requests carry a generation number;
-//! the UI drops results for stale generations (e.g. after a zoom change).
+//! is lazy, so this is cheap) and keeps its own render cache. Requests carry a caller tag that is
+//! echoed back; the UI drops results for stale tags (e.g. after a zoom change).
+//!
+//! **Robustness:** every page render runs under `catch_unwind`. A panic inside the renderer on a
+//! malformed page yields a `RenderedPage` with `error` set, and the worker rebuilds its parser and
+//! cache before continuing, so one bad page can never take down the app or poison later pages.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -13,24 +18,193 @@ use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{RenderCache, RenderSettings, render};
 
-/// Hard cap on a rendered side, to bound memory at extreme zoom levels (tiling arrives in M3.3).
-const MAX_SIDE: f32 = 8192.0;
+/// Monotonic-ish timer that is safe on wasm32 (where `std::time::Instant` panics).
+#[derive(Clone, Copy)]
+struct Stopwatch(#[cfg(not(target_arch = "wasm32"))] std::time::Instant);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+impl Stopwatch {
+    fn start() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        return Self(std::time::Instant::now());
+        #[cfg(target_arch = "wasm32")]
+        return Self();
+    }
+    fn millis(self) -> u32 {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.0.elapsed().as_millis() as u32;
+        #[cfg(target_arch = "wasm32")]
+        return 0;
+    }
+}
+
+/// Per-document rendering configuration.
+#[derive(Clone, Debug, Default)]
+pub struct RenderConfig {
+    /// User or owner password for encrypted documents.
+    pub password: Option<Arc<str>>,
+    /// Layer (optional content group) visibility overrides: (object number, generation, visible).
+    pub layers: Arc<Vec<(i32, i32, bool)>>,
+}
+
+impl RenderConfig {
+    fn settings(&self) -> InterpreterSettings {
+        InterpreterSettings { ocg_overrides: self.layers.clone(), ..InterpreterSettings::default() }
+    }
+}
+
+/// Hard cap on a rendered side, to bound memory at extreme zoom levels (tiling arrives in M3.3).
+pub const MAX_SIDE: f32 = 8192.0;
+/// Hard cap on rendered pixels per page (~64 MP ≈ 256 MB RGBA).
+pub const MAX_PIXELS: f32 = 64.0e6;
+
+/// What a request asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RequestKind {
+    /// A raster of the page.
+    #[default]
+    Pixels,
+    /// The page's text layer (glyphs with Unicode and boxes); `scale` is ignored.
+    Text,
+}
+
+/// A region of a scaled page, in device pixels (for tiled rendering of large pages).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Tile {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct RenderRequest {
     pub page: usize,
+    pub kind: RequestKind,
+    /// Render only this region (device pixels at `scale`). `None` renders the whole page.
+    pub tile: Option<Tile>,
     /// Device pixels per PDF point.
     pub scale: f32,
     /// Caller-defined tag, echoed back (used for zoom generations / thumbnail vs page).
     pub tag: u64,
 }
 
+#[derive(Debug)]
 pub struct RenderedPage {
     pub request: RenderRequest,
     pub width: u32,
     pub height: u32,
-    /// Premultiplied RGBA8, row-major.
+    /// Premultiplied RGBA8, row-major. Empty when `error` is set.
     pub rgba: Vec<u8>,
+    /// Why the page could not be rendered (renderer panic, empty page box, …).
+    pub error: Option<String>,
+    /// For `RequestKind::Text`.
+    pub text: Option<Arc<crate::text::PageText>>,
+    pub millis: u32,
+}
+
+/// Clamp a requested scale so the output respects `MAX_SIDE` and `MAX_PIXELS`.
+pub fn effective_scale(width_pt: f32, height_pt: f32, scale: f32) -> f32 {
+    let (w, h) = (width_pt.max(1.0), height_pt.max(1.0));
+    let by_side = MAX_SIDE / w.max(h);
+    let by_area = (MAX_PIXELS / (w * h)).sqrt();
+    scale.min(by_side).min(by_area).max(0.01)
+}
+
+/// Render one page with a caller-owned parser and cache. Panics inside the renderer are caught
+/// and reported as `Err((message, panicked))`.
+type Output = (u32, u32, Vec<u8>, Option<Arc<crate::text::PageText>>);
+
+fn render_page<'a>(pdf: &'a Pdf, cache: &RenderCache<'a>, settings: &InterpreterSettings, req: RenderRequest) -> Result<Output, (String, bool)> {
+    if req.kind == RequestKind::Text {
+        return match catch_unwind(AssertUnwindSafe(|| crate::text::extract_page(pdf, req.page, settings))) {
+            Ok(Some(t)) => Ok((0, 0, Vec::new(), Some(Arc::new(t)))),
+            Ok(None) => Err((format!("page {} does not exist", req.page + 1), false)),
+            Err(panic) => Err((format!("text extraction crashed on page {}: {}", req.page + 1, panic_message(&panic)), true)),
+        };
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let pages = pdf.pages();
+        let page = pages.get(req.page).ok_or_else(|| format!("page {} does not exist", req.page + 1))?;
+        let (w, h) = page.render_dimensions();
+        if !(w.is_finite() && h.is_finite()) || w < 0.5 || h < 0.5 {
+            return Err(format!("page {} has an empty or invalid page box ({w}×{h} pt)", req.page + 1));
+        }
+        let rs = match req.tile {
+            // Tiles are bounded by construction, so the page itself may be arbitrarily large.
+            Some(t) => {
+                let scale = req.scale.clamp(0.01, 400.0);
+                let (tw, th) = (t.w.clamp(1, 4096), t.h.clamp(1, 4096));
+                RenderSettings {
+                    x_scale: scale,
+                    y_scale: scale,
+                    width: Some(tw as u16),
+                    height: Some(th as u16),
+                    x_offset: t.x as f32,
+                    y_offset: t.y as f32,
+                    bg_color: WHITE,
+                }
+            }
+            None => {
+                let scale = effective_scale(w, h, req.scale);
+                RenderSettings { x_scale: scale, y_scale: scale, bg_color: WHITE, ..Default::default() }
+            }
+        };
+        let pixmap = render(page, cache, settings, &rs);
+        Ok((pixmap.width() as u32, pixmap.height() as u32, pixmap.data_as_u8_slice().to_vec(), None))
+    }));
+    match result {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err((e, false)),
+        Err(panic) => Err((format!("renderer crashed on page {}: {}", req.page + 1, panic_message(&panic)), true)),
+    }
+}
+
+fn finish(req: RenderRequest, start: Stopwatch, r: Result<Output, (String, bool)>) -> RenderedPage {
+    let millis = start.millis();
+    match r {
+        Ok((width, height, rgba, text)) => RenderedPage { request: req, width, height, rgba, error: None, text, millis },
+        Err((e, _)) => RenderedPage { request: req, width: 0, height: 0, rgba: Vec::new(), error: Some(e), text: None, millis },
+    }
+}
+
+/// A single-threaded renderer over one parsed document (used by the CLI and tests).
+pub struct PageRenderer {
+    bytes: Arc<Vec<u8>>,
+    config: RenderConfig,
+    pdf: Option<Pdf>,
+    settings: InterpreterSettings,
+}
+
+impl PageRenderer {
+    pub fn new(bytes: Arc<Vec<u8>>, config: RenderConfig) -> Self {
+        let pdf = parse(&bytes, config.password.as_deref());
+        let settings = config.settings();
+        Self { bytes, config, pdf, settings }
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.pdf.as_ref().map(|p| p.pages().len()).unwrap_or(0)
+    }
+
+    /// Render one page. Never panics.
+    pub fn render(&mut self, req: RenderRequest) -> RenderedPage {
+        let start = Stopwatch::start();
+        let Some(pdf) = self.pdf.as_ref() else { return finish(req, start, Err(("the document could not be parsed".into(), false))) };
+        let cache = RenderCache::new();
+        let r = render_page(pdf, &cache, &self.settings, req);
+        if matches!(r, Err((_, true))) {
+            self.pdf = parse(&self.bytes, self.config.password.as_deref());
+        }
+        finish(req, start, r)
+    }
+}
+
+fn parse(bytes: &Arc<Vec<u8>>, password: Option<&str>) -> Option<Pdf> {
+    catch_unwind(AssertUnwindSafe(|| Pdf::new_with_password(bytes.clone(), password.unwrap_or("")).ok())).ok().flatten()
+}
+
+pub(crate) fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".into())
 }
 
 type Queue = Arc<Mutex<Vec<RenderRequest>>>;
@@ -40,34 +214,53 @@ pub struct RenderPool {
     wake: Vec<Sender<()>>,
     results: Receiver<RenderedPage>,
     _workers: Vec<JoinHandle<()>>,
+    /// Used when threads are unavailable (wasm32 without atomics, or spawn failure): requests are
+    /// rendered on the calling thread inside `try_recv`, one per call.
+    inline: Option<std::cell::RefCell<PageRenderer>>,
 }
 
 impl RenderPool {
-    pub fn new(bytes: Arc<Vec<u8>>, threads: usize) -> Self {
+    pub fn new(bytes: Arc<Vec<u8>>, threads: usize, config: RenderConfig) -> Self {
         let queue: Queue = Arc::new(Mutex::new(Vec::new()));
         let (res_tx, results) = channel();
         let mut wake = Vec::new();
         let mut workers = Vec::new();
-        for i in 0..threads.max(1) {
+        let threads = if cfg!(target_arch = "wasm32") { 0 } else { threads.max(1) };
+        for i in 0..threads {
             let (wtx, wrx) = channel::<()>();
             wake.push(wtx);
             let queue = queue.clone();
             let res_tx = res_tx.clone();
             let bytes = bytes.clone();
-            let handle = std::thread::Builder::new()
-                .name(format!("printcraft-render-{i}"))
-                .spawn(move || worker(bytes, queue, wrx, res_tx))
-                .expect("spawn render worker");
-            workers.push(handle);
+            let config = config.clone();
+            let spawned = std::thread::Builder::new().name(format!("printcraft-render-{i}")).spawn(move || worker(bytes, config, queue, wrx, res_tx));
+            match spawned {
+                Ok(h) => workers.push(h),
+                Err(e) => log::error!("could not spawn render worker {i}: {e}"),
+            }
         }
-        Self { queue, wake, results, _workers: workers }
+        let inline = workers.is_empty().then(|| std::cell::RefCell::new(PageRenderer::new(bytes, config)));
+        Self { queue, wake, results, _workers: workers, inline }
+    }
+
+    /// A pool without worker threads: renders inside `try_recv` (the web path; also used in tests).
+    pub fn new_inline(bytes: Arc<Vec<u8>>, config: RenderConfig) -> Self {
+        let (_tx, results) = channel();
+        let inline = Some(std::cell::RefCell::new(PageRenderer::new(bytes, config)));
+        Self { queue: Arc::new(Mutex::new(Vec::new())), wake: Vec::new(), results, _workers: Vec::new(), inline }
+    }
+
+    /// `true` when rendering happens on the caller's thread (no worker threads available).
+    pub fn is_inline(&self) -> bool {
+        self.inline.is_some()
     }
 
     /// Replace the pending queue (most urgent first). In-flight renders are not interrupted.
     pub fn set_queue(&self, mut requests: Vec<RenderRequest>) {
         requests.reverse(); // workers pop from the end
-        if let Ok(mut q) = self.queue.lock() {
-            *q = requests;
+        match self.queue.lock() {
+            Ok(mut q) => *q = requests,
+            Err(poisoned) => *poisoned.into_inner() = requests,
         }
         for w in &self.wake {
             let _ = w.send(());
@@ -75,32 +268,46 @@ impl RenderPool {
     }
 
     pub fn try_recv(&self) -> Option<RenderedPage> {
+        if let Some(r) = &self.inline {
+            let next = match self.queue.lock() {
+                Ok(mut q) => q.pop(),
+                Err(poisoned) => poisoned.into_inner().pop(),
+            };
+            return next.map(|req| r.borrow_mut().render(req));
+        }
         self.results.try_recv().ok()
     }
 }
 
-fn worker(bytes: Arc<Vec<u8>>, queue: Queue, wake: Receiver<()>, out: Sender<RenderedPage>) {
-    let Ok(pdf) = Pdf::new(bytes) else { return };
-    let settings = InterpreterSettings::default();
-    let cache = RenderCache::new();
-    let pages = pdf.pages();
+fn worker(bytes: Arc<Vec<u8>>, config: RenderConfig, queue: Queue, wake: Receiver<()>, out: Sender<RenderedPage>) {
+    let settings = config.settings();
+    // Outer loop: (re)build parser + cache; rebuilt after a renderer panic.
     loop {
-        let next = queue.lock().ok().and_then(|mut q| q.pop());
-        let Some(req) = next else {
-            if wake.recv().is_err() {
-                return; // pool dropped
+        let pdf = parse(&bytes, config.password.as_deref());
+        let cache = RenderCache::new();
+        loop {
+            let next = match queue.lock() {
+                Ok(mut q) => q.pop(),
+                Err(poisoned) => poisoned.into_inner().pop(),
+            };
+            let Some(req) = next else {
+                if wake.recv().is_err() {
+                    return; // pool dropped
+                }
+                continue;
+            };
+            let start = Stopwatch::start();
+            let r = match &pdf {
+                Some(pdf) => render_page(pdf, &cache, &settings, req),
+                None => Err(("the document could not be parsed".into(), false)),
+            };
+            let panicked = matches!(r, Err((_, true)));
+            if out.send(finish(req, start, r)).is_err() {
+                return;
             }
-            continue;
-        };
-        let Some(page) = pages.get(req.page) else { continue };
-        let (w, h) = page.render_dimensions();
-        let scale = req.scale.min(MAX_SIDE / w.max(h).max(1.0));
-        let rs = RenderSettings { x_scale: scale, y_scale: scale, bg_color: WHITE, ..Default::default() };
-        let pixmap = render(page, &cache, &settings, &rs);
-        let (width, height) = (pixmap.width() as u32, pixmap.height() as u32);
-        let rgba = pixmap.data_as_u8_slice().to_vec();
-        if out.send(RenderedPage { request: req, width, height, rgba }).is_err() {
-            return;
+            if panicked {
+                break;
+            }
         }
     }
 }
@@ -121,18 +328,165 @@ trailer << /Root 1 0 R >>
 
     #[test]
     fn renders_a_blue_rectangle() {
-        let pool = RenderPool::new(Arc::new(ONE_PAGE.to_vec()), 1);
-        pool.set_queue(vec![RenderRequest { page: 0, scale: 1.0, tag: 7 }]);
+        let pool = RenderPool::new(Arc::new(ONE_PAGE.to_vec()), 1, RenderConfig::default());
+        pool.set_queue(vec![RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 7 }]);
         let page = loop {
             if let Some(p) = pool.try_recv() {
                 break p;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
+        assert!(page.error.is_none(), "{:?}", page.error);
         assert_eq!((page.width, page.height, page.request.tag), (100, 50, 7));
         // Pixel (20, 30) in y-down device space is inside the rect drawn at y 10..30 (y-up).
         let px = |x: u32, y: u32| &page.rgba[((y * page.width + x) * 4) as usize..][..4];
         assert_eq!(px(20, 30), &[0, 0, 255, 255]);
         assert_eq!(px(80, 5), &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn missing_page_and_garbage_input_fail_gracefully() {
+        let mut r = PageRenderer::new(Arc::new(ONE_PAGE.to_vec()), RenderConfig::default());
+        assert!(r.render(RenderRequest { page: 9, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0 }).error.is_some());
+        let mut g = PageRenderer::new(Arc::new(b"not a pdf at all".to_vec()), RenderConfig::default());
+        assert_eq!(g.page_count(), 0);
+        assert!(g.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0 }).error.is_some());
+    }
+
+    #[test]
+    fn scale_is_clamped_for_huge_pages() {
+        // A 200-inch-square page at 4x would be 57,600 px per side.
+        let s = effective_scale(14_400.0, 14_400.0, 4.0);
+        assert!(14_400.0 * s <= MAX_SIDE + 0.5);
+        assert!((14_400.0 * s).powi(2) <= MAX_PIXELS * 1.01);
+    }
+
+    /// A checkbox whose `/AP /N` is a state dictionary must draw the `/AS` state; a NoView
+    /// annotation must not draw at all. (Regression test for the vendored hayro patch.)
+    #[test]
+    fn widget_appearance_states() {
+        let pdf = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Annots [4 0 R 7 0 R] >> endobj
+4 0 obj << /Type /Annot /Subtype /Widget /FT /Btn /T (cb) /V /Yes /AS /Yes /Rect [10 10 30 30]
+   /AP << /N << /Yes 5 0 R /Off 6 0 R >> >> >> endobj
+5 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Length 24 >> stream
+1 0 0 rg 0 0 20 20 re f
+endstream endobj
+6 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Length 24 >> stream
+0 0 1 rg 0 0 20 20 re f
+endstream endobj
+7 0 obj << /Type /Annot /Subtype /Square /F 32 /Rect [60 60 90 90] /AP << /N 8 0 R >> >> endobj
+8 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 30 30] /Length 24 >> stream
+0 1 0 rg 0 0 30 30 re f
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+        let mut r = PageRenderer::new(Arc::new(pdf.to_vec()), RenderConfig::default());
+        let p = r.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0 });
+        assert!(p.error.is_none(), "{:?}", p.error);
+        let px = |x: u32, y: u32| p.rgba[((y * p.width + x) * 4) as usize..][..4].to_vec();
+        assert_eq!(px(20, 80), vec![255, 0, 0, 255], "checkbox must show its /Yes state");
+        assert_eq!(px(75, 25), vec![255, 255, 255, 255], "NoView annotation must not be drawn");
+    }
+
+    #[test]
+    fn inline_pool_renders_in_priority_order() {
+        let pool = RenderPool::new_inline(Arc::new(ONE_PAGE.to_vec()), RenderConfig::default());
+        assert!(pool.is_inline());
+        assert!(pool.try_recv().is_none());
+        pool.set_queue(vec![
+            RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 1 },
+            RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 0.5, tag: 2 },
+        ]);
+        assert_eq!(pool.try_recv().map(|p| p.request.tag), Some(1));
+        assert_eq!(pool.try_recv().map(|p| (p.request.tag, p.width)), Some((2, 50)));
+        assert!(pool.try_recv().is_none());
+    }
+
+    #[test]
+    fn extracts_text_with_positions() {
+        let pdf = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj
+4 0 obj << /Length 60 >> stream
+BT /F1 12 Tf 20 70 Td (Hello World) Tj 0 -30 Td (Second) Tj ET
+endstream endobj
+5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+        let mut r = PageRenderer::new(Arc::new(pdf.to_vec()), RenderConfig::default());
+        let out = r.render(RenderRequest { page: 0, kind: RequestKind::Text, tile: None, scale: 1.0, tag: 0 });
+        assert!(out.error.is_none(), "{:?}", out.error);
+        let t = out.text.expect("text");
+        assert_eq!(t.plain_text(), "Hello World\nSecond");
+        // "H" sits at x=20, baseline y=70 (y-up) → view y ≈ 100-70 = 30 at the baseline.
+        let h = &t.glyphs[0].rect;
+        assert!((h[0] - 20.0).abs() < 0.5 && h[1] < 30.0 && h[3] > 30.0, "{h:?}");
+        assert_eq!(t.find("world").len(), 1);
+    }
+
+    #[test]
+    fn layer_override_hides_content() {
+        let pdf = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << /Order [5 0 R] >> >> >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /Properties << /L1 5 0 R >> >> >> endobj
+4 0 obj << /Length 44 >> stream
+/OC /L1 BDC 1 0 0 rg 0 0 100 100 re f EMC
+endstream endobj
+5 0 obj << /Type /OCG /Name (Red) >> endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+        let px = |cfg: RenderConfig| {
+            let mut r = PageRenderer::new(Arc::new(pdf.to_vec()), cfg);
+            let p = r.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 0.5, tag: 0 });
+            p.rgba[..4].to_vec()
+        };
+        assert_eq!(px(RenderConfig::default()), vec![255, 0, 0, 255], "layer is on by default");
+        let off = RenderConfig { layers: Arc::new(vec![(5, 0, false)]), ..Default::default() };
+        assert_eq!(px(off), vec![255, 255, 255, 255], "toggled-off layer must not draw");
+    }
+
+    #[test]
+    fn tiles_match_full_render() {
+        let mut r = PageRenderer::new(Arc::new(ONE_PAGE.to_vec()), RenderConfig::default());
+        let full = r.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 2.0, tag: 0 });
+        let tile = Tile { x: 30, y: 40, w: 50, h: 30 };
+        let part = r.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: Some(tile), scale: 2.0, tag: 0 });
+        assert_eq!((part.width, part.height), (50, 30));
+        for y in 0..30u32 {
+            for x in 0..50u32 {
+                let a = &full.rgba[(((y + 40) * full.width + x + 30) * 4) as usize..][..4];
+                let b = &part.rgba[((y * 50 + x) * 4) as usize..][..4];
+                assert_eq!(a, b, "pixel {x},{y}");
+            }
+        }
+    }
+
+    /// An alpha soft mask whose transparency group has no /CS (as Chrome writes gradient text)
+    /// must still mask. Regression test for the vendored hayro-interpret patch.
+    #[test]
+    fn soft_mask_without_group_colour_space_is_applied() {
+        let pdf = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /ExtGState << /M 5 0 R >> >> >> endobj
+4 0 obj << /Length 31 >> stream
+/M gs 1 0 0 rg 0 0 100 100 re f
+endstream endobj
+5 0 obj << /Type /ExtGState /SMask << /Type /Mask /S /Alpha /G 6 0 R >> >> endobj
+6 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Group << /S /Transparency /I true >> /Length 20 >> stream
+0 g 0 0 50 100 re f
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+        let mut r = PageRenderer::new(Arc::new(pdf.to_vec()), RenderConfig::default());
+        let p = r.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0 });
+        let px = |x: u32, y: u32| p.rgba[((y * p.width + x) * 4) as usize..][..4].to_vec();
+        assert_eq!(px(25, 50), vec![255, 0, 0, 255], "inside the mask");
+        assert_eq!(px(75, 50), vec![255, 255, 255, 255], "outside the mask");
     }
 }

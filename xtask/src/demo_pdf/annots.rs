@@ -223,11 +223,7 @@ impl Annotator {
     fn note_icon(&self, doc: &mut Document, r: Rect, fill: Rgb) -> ObjectId {
         let (w, h) = (r.w(), r.h());
         let mut c = Content::new();
-        c.fill_color(fill)
-            .stroke_color(colors::INK)
-            .line_width(0.8)
-            .rounded_rect(0.5, 0.5, w - 1.0, h - 1.0, 3.0)
-            .fill_stroke();
+        c.fill_color(fill).stroke_color(colors::INK).line_width(0.8).rounded_rect(0.5, 0.5, w - 1.0, h - 1.0, 3.0).fill_stroke();
         c.line_width(1.0).round_caps();
         for i in 1..=3 {
             let y = h - 0.5 - (h - 1.0) * i as f32 / 4.2;
@@ -240,14 +236,7 @@ impl Annotator {
 
     fn sticky_note(&mut self, doc: &mut Document, page: ObjectId, self_id: ObjectId, r: Rect) -> (Dictionary, Vec<ObjectId>) {
         let r = Rect::xywh(r.x0, r.y1 - 20.0, 20.0, 20.0);
-        let mut dict = self.base(
-            "Text",
-            r,
-            colors::GOLD,
-            AUTHOR,
-            "Sticky notes hold threaded discussions. This one has two replies.",
-            page,
-        );
+        let mut dict = self.base("Text", r, colors::GOLD, AUTHOR, "Sticky notes hold threaded discussions. This one has two replies.", page);
         dict.set("F", 28); // Print | NoZoom | NoRotate
         dict.set("Name", "Comment");
         dict.set("Open", false);
@@ -319,22 +308,16 @@ impl Annotator {
         dict.set("DS", Object::string_literal("font: Helvetica,sans-serif 9.0pt; text-align:left; color:#16213B"));
         dict.set(
             "RC",
-            text(&format!(
-                "<?xml version=\"1.0\"?><body xmlns=\"http://www.w3.org/1999/xhtml\" \
-                 xmlns:xfa=\"http://www.xfa.org/schema/xfa-data/1.0/\" xfa:APIVersion=\"Acroform:2.7.0.0\" \
-                 xfa:spec=\"2.0.2\"><p><b>FreeText:</b> typed straight onto the page, with a /DA and \
-                 <span style=\"color:#E4572E\">rich text</span>.</p></body>"
-            )),
+            text(
+                "<?xml version=\"1.0\"?><body xmlns=\"http://www.w3.org/1999/xhtml\"><p><b>FreeText:</b> \
+                 typed straight onto the page, with a /DA and <span style=\"color:#E4572E\">rich text</span>.</p></body>",
+            ),
         );
         dict.set("Q", 0);
         dict.set("BS", dictionary! { "W" => 1, "S" => "S" });
         let (w, h) = (r.w(), r.h());
         let mut c = Content::new();
-        c.fill_color(colors::FIELD)
-            .stroke_color(colors::BLUE)
-            .line_width(1.0)
-            .rect(0.5, 0.5, w - 1.0, h - 1.0)
-            .fill_stroke();
+        c.fill_color(colors::FIELD).stroke_color(colors::BLUE).line_width(1.0).rect(0.5, 0.5, w - 1.0, h - 1.0).fill_stroke();
         c.save().rect(2.0, 2.0, w - 4.0, h - 4.0).clip();
         c.fill_color(colors::INK);
         c.text(Font::HelvBold, 9.0, 6.0, h - 15.0, "FreeText:");
@@ -363,12 +346,7 @@ impl Annotator {
         let mut c = Content::new();
         c.stroke_color(colors::INK).line_width(1.5).round_caps();
         c.move_to(lx0, ly0).line_to(bx, by).stroke();
-        c.fill_color(colors::ACCENT)
-            .move_to(lx1, ly1)
-            .line_to(bx - uy * aw, by + ux * aw)
-            .line_to(bx + uy * aw, by - ux * aw)
-            .close()
-            .fill_stroke();
+        c.fill_color(colors::ACCENT).move_to(lx1, ly1).line_to(bx - uy * aw, by + ux * aw).line_to(bx + uy * aw, by - ux * aw).close().fill_stroke();
         c.ellipse(lx0, ly0, 3.0, 3.0).fill_stroke();
         self.set_ap(doc, &mut dict, r, c, Dictionary::new());
         dict
@@ -440,11 +418,7 @@ impl Annotator {
             let len = (dx * dx + dy * dy).sqrt();
             let (ux, uy) = (dx / len, dy / len);
             let (bx, by) = (b.0 - ux * 9.0, b.1 - uy * 9.0);
-            c.round_caps()
-                .move_to(bx - uy * 5.0, by + ux * 5.0)
-                .line_to(b.0, b.1)
-                .line_to(bx + uy * 5.0, by - ux * 5.0)
-                .stroke();
+            c.round_caps().move_to(bx - uy * 5.0, by + ux * 5.0).line_to(b.0, b.1).line_to(bx + uy * 5.0, by - ux * 5.0).stroke();
         }
         self.set_ap(doc, &mut dict, r, c, Dictionary::new());
         dict
@@ -452,12 +426,13 @@ impl Annotator {
 
     fn ink(&mut self, doc: &mut Document, page: ObjectId, r: Rect) -> Dictionary {
         let (w, h) = (r.w(), r.h());
-        // A looping "signature-like" scribble and a short underline swoosh.
-        let scribble: Vec<(f32, f32)> = (0..=120)
+        // A looping, cursive "signature" (a prolate trochoid) and an underline swoosh.
+        let loops = 6.0 * std::f32::consts::TAU;
+        let scribble: Vec<(f32, f32)> = (0..=360)
             .map(|i| {
-                let t = i as f32 / 120.0;
-                let x = 6.0 + t * (w * 0.78) + 7.0 * (t * 38.0).sin();
-                let y = h * 0.6 + (h * 0.26) * (t * 19.0).sin() * (1.0 - 0.5 * t);
+                let t = i as f32 / 360.0;
+                let x = 10.0 + t * (w * 0.8) - 7.0 * (loops * t).sin();
+                let y = h * 0.62 + h * 0.24 * (loops * t).cos() * (1.0 - 0.35 * t);
                 (x, y)
             })
             .collect();
@@ -468,10 +443,8 @@ impl Annotator {
             })
             .collect();
         let mut dict = self.base("Ink", r, colors::ACCENT, AUTHOR, "Freehand ink: two strokes.", page);
-        let ink_list: Vec<Object> = [&scribble, &swoosh]
-            .iter()
-            .map(|pts| floats(&pts.iter().flat_map(|&(x, y)| [r.x0 + x, r.y0 + y]).collect::<Vec<_>>()))
-            .collect();
+        let ink_list: Vec<Object> =
+            [&scribble, &swoosh].iter().map(|pts| floats(&pts.iter().flat_map(|&(x, y)| [r.x0 + x, r.y0 + y]).collect::<Vec<_>>())).collect();
         dict.set("InkList", ink_list);
         dict.set("BS", dictionary! { "W" => 1.8, "S" => "S" });
         let mut c = Content::new();

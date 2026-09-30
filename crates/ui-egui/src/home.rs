@@ -32,6 +32,7 @@ pub fn show(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
                         for id in RECOMMENDED {
                             let Some(g) = catalog::group(id) else { continue };
                             let (rect, resp) = ui.allocate_exact_size(vec2(190.0, 104.0), Sense::click());
+                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, g.label));
                             let fill = if resp.hovered() { t.hover } else { t.card };
                             ui.painter().rect(rect, CornerRadius::same(10), fill, Stroke::new(1.0, t.divider), egui::StrokeKind::Inside);
                             let color = egui::Color32::from_rgb(g.hue[0], g.hue[1], g.hue[2]);
@@ -57,6 +58,7 @@ pub fn show(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
                             }
                         }
                         let (rect, resp) = ui.allocate_exact_size(vec2(170.0, 104.0), Sense::click());
+                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Open file"));
                         ui.painter().rect(
                             rect,
                             CornerRadius::same(10),
@@ -81,6 +83,7 @@ pub fn show(app: &mut PrintCraftApp, ui: &mut egui::Ui) {
             let mut open = None;
             for r in &app.recent {
                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &r.name));
                 if resp.hovered() {
                     ui.painter().rect_filled(rect, CornerRadius::same(8), t.hover);
                 }

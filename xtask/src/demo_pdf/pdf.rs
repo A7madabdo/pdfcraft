@@ -10,11 +10,7 @@ pub struct Rgb(pub f32, pub f32, pub f32);
 
 impl Rgb {
     pub const fn hex(v: u32) -> Self {
-        Rgb(
-            ((v >> 16) & 0xff) as f32 / 255.0,
-            ((v >> 8) & 0xff) as f32 / 255.0,
-            (v & 0xff) as f32 / 255.0,
-        )
+        Rgb(((v >> 16) & 0xff) as f32 / 255.0, ((v >> 8) & 0xff) as f32 / 255.0, (v & 0xff) as f32 / 255.0)
     }
 
     pub fn array(self) -> Object {
@@ -74,10 +70,7 @@ pub struct Stamp {
 
 impl Stamp {
     pub fn now() -> Self {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         Self::from_unix(secs)
     }
 
@@ -95,11 +88,7 @@ impl Stamp {
         let d = doy - (153 * mp + 2) / 5 + 1;
         let m = if mp < 10 { mp + 3 } else { mp - 9 };
         let y = yoe + era * 400 + i64::from(m <= 2);
-        Stamp {
-            unix: secs,
-            pdf: format!("D:{y:04}{m:02}{d:02}{h:02}{mi:02}{s:02}Z"),
-            iso: format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z"),
-        }
+        Stamp { unix: secs, pdf: format!("D:{y:04}{m:02}{d:02}{h:02}{mi:02}{s:02}Z"), iso: format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z") }
     }
 
     /// The same moment shifted by `minutes` (used to order threaded replies).
@@ -120,14 +109,7 @@ pub enum Font {
 }
 
 impl Font {
-    pub const ALL: [Font; 6] = [
-        Font::Helv,
-        Font::HelvBold,
-        Font::Times,
-        Font::TimesItalic,
-        Font::Courier,
-        Font::ZapfDingbats,
-    ];
+    pub const ALL: [Font; 6] = [Font::Helv, Font::HelvBold, Font::Times, Font::TimesItalic, Font::Courier, Font::ZapfDingbats];
 
     /// Resource name, following the conventional AcroForm names.
     pub fn res(self) -> &'static str {
@@ -338,30 +320,13 @@ impl Content {
 
     /// One line of text with its baseline starting at (x, y).
     pub fn text(&mut self, font: Font, size: f32, x: f32, y: f32, s: &str) -> &mut Self {
-        let _ = writeln!(
-            self.0,
-            "BT /{} {} Tf {} {} Td {} Tj ET",
-            font.res(),
-            num(size),
-            num(x),
-            num(y),
-            pdf_string(s)
-        );
+        let _ = writeln!(self.0, "BT /{} {} Tf {} {} Td {} Tj ET", font.res(), num(size), num(x), num(y), pdf_string(s));
         self
     }
 
     /// Text with letter-spacing (`Tc`), for tracked capitals.
     pub fn tracked_text(&mut self, font: Font, size: f32, x: f32, y: f32, tracking: f32, s: &str) -> &mut Self {
-        let _ = writeln!(
-            self.0,
-            "BT /{} {} Tf {} Tc {} {} Td {} Tj ET",
-            font.res(),
-            num(size),
-            num(tracking),
-            num(x),
-            num(y),
-            pdf_string(s)
-        );
+        let _ = writeln!(self.0, "BT /{} {} Tf {} Tc {} {} Td {} Tj 0 Tc ET", font.res(), num(size), num(tracking), num(x), num(y), pdf_string(s));
         self
     }
 }

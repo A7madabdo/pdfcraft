@@ -1,0 +1,18 @@
+[package]
+name = "printcraft-cli"
+description = "PrintCraft command-line tool: inspect, render and robustness-check PDFs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "printcraft-cli"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+printcraft-render = { workspace = true }
+serde_json = { workspace = true }
+printcraft-engine = { workspace = true }

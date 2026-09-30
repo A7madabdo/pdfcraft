@@ -64,7 +64,7 @@ body {
 .page:last-child { break-after: auto; }
 
 a { color: var(--blue); text-decoration: none; }
-a.mk { color: inherit; }
+a.mk { color: inherit; white-space: nowrap; }
 
 /* running header and folio */
 .runhead {
@@ -163,6 +163,11 @@ small, .small { font-size: 8pt; }
 .tracking div { font: 500 11pt var(--sans); text-transform: uppercase; color: var(--ink-2); padding: 3pt 0; border-bottom: 0.5pt dotted var(--rule); display: flex; justify-content: space-between; }
 .tracking span.v { font: 400 7pt var(--mono); color: var(--ink-3); letter-spacing: 0; text-transform: none; }
 
+.families { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8pt; margin-top: 6pt; }
+.families div { border-top: 1.5pt solid var(--ink); padding-top: 4pt; font: 400 7pt/1.3 var(--sans); color: var(--ink-3); }
+.families span { display: block; font-size: 30pt; line-height: 1.25; color: var(--ink); }
+.families b { display: block; font: 600 7.5pt var(--sans); color: var(--ink); }
+
 /* ---------- body text ---------- */
 .cols {
   column-count: 2; column-gap: 0.32in; column-rule: 0.5pt solid var(--rule);
@@ -189,7 +194,7 @@ sup.fn { font: 600 6.5pt var(--sans); color: var(--accent); vertical-align: supe
   position: absolute; left: 0.85in; right: 0.85in; bottom: 0.85in;
   border-top: 0.5pt solid var(--ink-3); padding-top: 6pt; width: 2.2in;
 }
-.footnotes-body { position: absolute; left: 0.85in; right: 0.85in; bottom: 0.82in; font: 7.5pt/1.45 var(--serif); color: var(--ink-2); columns: 2; column-gap: 0.32in; }
+.footnotes-body { position: absolute; left: 0.85in; right: 0.85in; bottom: 0.82in; border-top: 0.5pt solid var(--ink-3); padding-top: 6pt; font: 7.5pt/1.45 var(--serif); color: var(--ink-2); columns: 2; column-gap: 0.32in; }
 .footnotes-body p { margin: 0 0 3pt; }
 .footnotes-body b { font: 600 6.5pt var(--sans); color: var(--accent); }
 
@@ -209,14 +214,13 @@ sup.fn { font: 600 6.5pt var(--sans); color: var(--accent); vertical-align: supe
 
 /* ---------- expressive ---------- */
 .fx-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14pt 22pt; }
-.fx { border: 0.5pt solid var(--rule); border-radius: 6pt; padding: 12pt 14pt 10pt; background: #fffdf8; position: relative; overflow: hidden; height: 1.35in; }
+.fx { border: 0.5pt solid var(--rule); border-radius: 6pt; padding: 12pt 14pt 10pt; background: #fffdf8; position: relative; overflow: hidden; height: 1.5in; }
 .fx .caption { position: absolute; bottom: 8pt; left: 14pt; right: 14pt; }
-.shadow { font: 800 40pt var(--ui); color: #fffdf8; letter-spacing: -0.02em; text-shadow: 3pt 3pt 0 rgba(228,87,46,0.55), 6pt 6pt 0 rgba(42,111,219,0.35), 0 0 1pt rgba(22,33,59,0.9); }
-.gradtext { display: inline-block; padding-right: 4pt; font: 800 42pt/1 var(--ui); letter-spacing: -0.03em; background: linear-gradient(120deg, #2a6fdb, #1a9e8f 40%, #e9a100 70%, #e4572e); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.rot { position: absolute; top: 18pt; right: 18pt; transform: rotate(-12deg); font: 700 13pt var(--sans); color: #fff; background: var(--accent); padding: 3pt 10pt; letter-spacing: 0.2em; }
-.skew { display: inline-block; transform: skewX(-18deg); font: 700 28pt var(--sans); background: var(--ink); color: var(--paper); padding: 2pt 14pt; }
+.shadow { font: 800 40pt "Avenir Next", var(--sans); color: #fffdf8; letter-spacing: -0.02em; text-shadow: 3pt 3pt 0 rgba(228,87,46,0.55), 6pt 6pt 0 rgba(42,111,219,0.35), 0 0 1pt rgba(22,33,59,0.9); }
+.rot { position: absolute; top: 12pt; right: 14pt; transform: rotate(-12deg); font: 700 13pt var(--sans); color: #fff; background: var(--accent); padding: 3pt 10pt; letter-spacing: 0.2em; }
+.skew { display: inline-block; transform: skewX(-18deg); font: 700 24pt var(--sans); background: var(--ink); color: var(--paper); padding: 2pt 14pt; }
 .vert-stack { font: 600 9pt var(--sans); letter-spacing: 0.3em; writing-mode: vertical-rl; transform: rotate(180deg); position: absolute; left: 12pt; top: 12pt; color: var(--teal); text-transform: uppercase; }
-.outline-text { font: 800 38pt var(--ui); color: transparent; -webkit-text-stroke: 1pt var(--ink); letter-spacing: 0.02em; }
+.outline-text { font: 700 34pt/1.1 "Avenir Next", var(--sans); color: transparent; -webkit-text-stroke: 1pt var(--ink); letter-spacing: 0.02em; }
 .tracked { font: 400 9pt var(--sans); letter-spacing: 0.6em; text-transform: uppercase; color: var(--ink-2); }
 
 /* ---------- scripts ---------- */
@@ -224,7 +228,7 @@ sup.fn { font: 600 6.5pt var(--sans); color: var(--accent); vertical-align: supe
 .sc { border-top: 1.5pt solid var(--ink); padding: 6pt 0 0; }
 .sc .nm { font: 600 6.8pt var(--sans); letter-spacing: 0.2em; text-transform: uppercase; color: var(--ink-3); display: flex; justify-content: space-between; }
 .sc .nm i { font-style: normal; color: var(--accent); letter-spacing: 0.05em; }
-.sc .tx { font-size: 14pt; line-height: 1.35; margin-top: 3pt; }
+.sc .tx { font-size: 13.5pt; white-space: nowrap; line-height: 1.35; margin-top: 3pt; }
 .sc .en { font: italic 8pt var(--serif); color: var(--ink-3); margin-top: 2pt; }
 .jp-block {
   writing-mode: vertical-rl; font: 15pt/1.7 "Hiragino Mincho ProN", serif; height: 2.7in;
@@ -378,6 +382,15 @@ a.box { position: absolute; display: block; color: transparent; font-size: 1pt; 
     <div style="letter-spacing:0.12em">Measure twice, set once <span class="v">+120</span></div>
     <div style="letter-spacing:0.3em">Measure twice <span class="v">+300</span></div>
   </div>
+  <h3>The families in this specimen</h3>
+  <div class="families">
+    <div><span style="font-family:Didot">Ag</span><b>Didot</b>Display</div>
+    <div><span style="font-family:'Hoefler Text'">Ag</span><b>Hoefler Text</b>Body text</div>
+    <div><span style="font-family:'Avenir Next';font-weight:500">Ag</span><b>Avenir Next</b>Labels</div>
+    <div><span style="font-family:'PC Mono'">Ag</span><b>JetBrains Mono</b>Code</div>
+    <div><span style="font-family:'Snell Roundhand'">Ag</span><b>Snell Roundhand</b>Script</div>
+    <div><span style="font-family:'STIX Two Math'">∑x</span><b>STIX Two Math</b>Mathematics</div>
+  </div>
   <div class="folio"><span>Foreword</span><b>ii</b></div>
 </section>
 
@@ -388,16 +401,15 @@ a.box { position: absolute; display: block; color: transparent; font-size: 1pt; 
   <h2 class="sec" id="h-setting">Setting <em>Text</em></h2>
   <p class="dek">Two justified columns with automatic hyphenation, old-style figures, a drop cap and a pull quote &mdash; the everyday machinery of a well-made page.</p>
   <div class="cols">
-    <p class="first">Long before there were screens, a page of type was a negotiation between the width of a column and the length of the words that had to fill it. The compositor adjusted spaces, divided a word at a sensible syllable, and occasionally rewrote a line so the paragraph would lie flat. Justified text asks for exactly that care, and <a class="mk" href="https://mark.printcraft.invalid/highlight/body">a renderer must honour the spacing it was given</a>.<sup class="fn">1</sup></p>
+    <p class="first">Long before there were screens, a page of type was a negotiation between the width of a column and the length of the words that had to fill it. The compositor adjusted spaces, divided a word at a sensible syllable, and occasionally rewrote a line so the paragraph would lie flat. Justified text asks for exactly that care, and a renderer must <a class="mk" href="https://mark.printcraft.invalid/highlight/body">honour the spacing</a> it was given.<sup class="fn">1</sup></p>
     <p>A PDF does not reflow. Every glyph has already been placed by the program that wrote the file, and the reader&rsquo;s job is to reproduce those positions faithfully at any zoom. That sounds simple until one remembers that a single line may mix three fonts, a ligature standing in for two letters, and a hyphen that exists only because the line happened to break there in 1994 or 2026.</p>
     <p>Old-style figures, like the ones in this paragraph&rsquo;s 1,280 characters and 36 lines, rise and fall with the lowercase so that numbers do not shout. Ligatures such as <i>fi</i>, <i>fl</i> and <i>ffi</i> in words like <i>officially</i>, <i>affluent</i> and <i>afflicted</i> join letters that would otherwise collide.<sup class="fn">2</sup></p>
-    <div class="pull">&ldquo;The best typography is the kind you only notice when it is missing.&rdquo;<cite>A working maxim of the trade</cite></div>
+    <div class="pull">&ldquo;Good typography is noticed only when it is missing.&rdquo;<cite>A working maxim of the trade</cite></div>
     <p>Hyphenation is where browsers and word processors differ most. Chrome consults the system&rsquo;s hyphenation dictionaries when a paragraph declares its language and asks for automatic hyphens, which is why the words in these columns occasionally divide across lines. The result is a more even texture, with fewer rivers of white running down the column.</p>
     <p>Columns introduce their own questions: where to break, whether a heading may sit at the foot of one, and how a quotation spanning both should interrupt the flow. Here the pull quote spans the full measure and the text resumes beneath it, balanced between the two columns.</p>
     <p>Small text matters too. Notes, captions and legal lines are often set at seven or eight points, where hinting, stem darkening and subpixel positioning decide whether a reader squints. The footnotes below are set at seven and a half points in the same face as the body.<sup class="fn">3</sup></p>
     <p>Finally, notice the drop cap that opens this chapter. It is an ordinary letter, floated and enlarged, with the first line set in small capitals. A renderer need do nothing special for it, which is precisely the point: most typographic richness in a PDF is just careful placement of ordinary glyphs.</p>
   </div>
-  <div class="footnotes"></div>
   <div class="footnotes-body">
     <p><b>1</b> Word spacing in PDF is usually baked into glyph positions rather than expressed with the word-spacing operator, so readers rarely need to stretch anything themselves.</p>
     <p><b>2</b> In a PDF a ligature is a single glyph; text extraction relies on the font&rsquo;s ToUnicode map to recover the letters it represents.</p>
@@ -453,8 +465,8 @@ a.box { position: absolute; display: block; color: transparent; font-size: 1pt; 
   <p class="dek">Effects that become transparency groups, soft masks, clipping paths and transformed text objects once they reach PDF.</p>
   <div class="fx-grid">
     <div class="fx"><div class="shadow">Layered</div><div class="caption"><b>text-shadow</b> &middot; two translucent offset copies composited under the glyphs</div></div>
-    <div class="fx"><div class="gradtext">Spectrum</div><div class="caption"><b>background-clip: text</b> &middot; a linear shading clipped to glyph outlines</div></div>
-    <div class="fx"><div style="margin-top:22pt"><span class="skew">Skewed</span></div><div class="rot">Rotated</div><div class="caption"><b>transform</b> &middot; skewX(&minus;18&deg;) on a filled box and rotate(&minus;12&deg;) on a label</div></div>
+    <div class="fx"><svg viewBox="0 0 250 60" style="width:2.6in;height:auto;display:block" aria-label="Spectrum"><defs><linearGradient id="specg" x1="0" y1="0" x2="1" y2="0.4"><stop offset="0" stop-color="#2a6fdb"/><stop offset="0.4" stop-color="#1a9e8f"/><stop offset="0.7" stop-color="#e9a100"/><stop offset="1" stop-color="#e4572e"/></linearGradient></defs><text x="0" y="48" font-family="Avenir Next, sans-serif" font-weight="800" font-size="50" letter-spacing="-1" fill="url(#specg)">Spectrum</text></svg><div class="caption"><b>Gradient-filled text</b> &middot; an axial shading clipped to glyph outlines (text render mode 7)</div></div>
+    <div class="fx"><div style="margin-top:26pt;margin-left:6pt"><span class="skew">Skewed</span></div><div class="rot">Rotated</div><div class="caption"><b>transform</b> &middot; skewX(&minus;18&deg;) on a filled box and rotate(&minus;12&deg;) on a label</div></div>
     <div class="fx"><div class="outline-text">Outline</div><div class="tracked" style="margin-top:4pt">Tracked to 600</div><div class="caption"><b>-webkit-text-stroke</b> &middot; glyphs stroked, not filled (render mode 1)</div></div>
   </div>
 
@@ -488,23 +500,23 @@ a.box { position: absolute; display: block; color: transparent; font-size: 1pt; 
   <div class="kicker">Chapter four</div>
   <h2 class="sec" id="h-scripts">Scripts of the <em>World</em></h2>
   <p class="dek">A short greeting &mdash; roughly, &ldquo;every letter deserves a good home&rdquo; &mdash; in writing systems that need bidirectional layout, contextual shaping, reordering and vertical setting.</p>
-  <div style="display:grid;grid-template-columns:1fr 1.25in;gap:18pt">
+  <div style="display:grid;grid-template-columns:1fr 1in;gap:16pt">
   <div class="scripts">
-    <div class="sc" lang="ar" dir="rtl"><div class="nm" dir="ltr">Arabic <i>RTL &middot; joining</i></div><div class="tx" style="font-family:'Geeza Pro'">لكل حرف بيت جميل</div><div class="en" dir="ltr">Geeza Pro</div></div>
+    <div class="sc" lang="ar" dir="rtl"><div class="nm" dir="ltr">Arabic <i>RTL &middot; joining</i></div><div class="tx" style="font-family:'Geeza Pro'">لكل حرف بيت</div><div class="en" dir="ltr">Geeza Pro</div></div>
     <div class="sc" lang="he" dir="rtl"><div class="nm" dir="ltr">Hebrew <i>RTL</i></div><div class="tx" style="font-family:'SF Hebrew','Arial Hebrew',sans-serif">לכל אות יש בית טוב</div><div class="en" dir="ltr">SF Hebrew</div></div>
-    <div class="sc" lang="hi"><div class="nm">Devanagari <i>conjuncts</i></div><div class="tx" style="font-family:'Kohinoor Devanagari'">हर अक्षर का सुंदर घर</div><div class="en">Kohinoor Devanagari</div></div>
-    <div class="sc" lang="th"><div class="nm">Thai <i>no spaces</i></div><div class="tx" style="font-family:Thonburi,sans-serif">ทุกตัวอักษรมีบ้านที่ดี</div><div class="en">Thonburi</div></div>
+    <div class="sc" lang="hi"><div class="nm">Devanagari <i>conjuncts</i></div><div class="tx" style="font-family:'Kohinoor Devanagari'">हर अक्षर का घर</div><div class="en">Kohinoor Devanagari</div></div>
+    <div class="sc" lang="th"><div class="nm">Thai <i>no spaces</i></div><div class="tx" style="font-family:Thonburi,sans-serif">ทุกอักษรมีบ้าน</div><div class="en">Thonburi</div></div>
     <div class="sc" lang="el"><div class="nm">Greek <i>polytonic</i></div><div class="tx" style="font-family:'Hoefler Text',serif">Κάθε γράμμα ἔχει σπίτι</div><div class="en">Hoefler Text</div></div>
-    <div class="sc" lang="ru"><div class="nm">Cyrillic</div><div class="tx" style="font-family:Baskerville,serif">У каждой буквы есть дом</div><div class="en">Baskerville</div></div>
-    <div class="sc" lang="zh-Hans"><div class="nm">Chinese <i>simplified</i></div><div class="tx" style="font-family:'PingFang SC','Hiragino Sans GB',sans-serif">每个字都有一个好家</div><div class="en">PingFang SC</div></div>
-    <div class="sc" lang="ko"><div class="nm">Korean <i>Hangul</i></div><div class="tx" style="font-family:'Apple SD Gothic Neo',sans-serif">모든 글자에게 좋은 집을</div><div class="en">Apple SD Gothic Neo</div></div>
-    <div class="sc"><div class="nm">IPA <i>phonetics</i></div><div class="tx" style="font-family:'Charis SIL','Hoefler Text','Times New Roman',serif">/ˈtaɪpˌsɛtɪŋ ɪz ˈkræft/</div><div class="en">International Phonetic Alphabet</div></div>
-    <div class="sc" lang="hy"><div class="nm">Armenian</div><div class="tx" style="font-family:'SF Armenian',sans-serif">Ամեն տառ ունի տուն</div><div class="en">SF Armenian</div></div>
-    <div class="sc" lang="ka"><div class="nm">Georgian</div><div class="tx" style="font-family:'SF Georgian',sans-serif">ყველა ასოს აქვს სახლი</div><div class="en">SF Georgian</div></div>
-    <div class="sc" lang="ta"><div class="nm">Tamil</div><div class="tx" style="font-family:'Tamil Sangam MN',sans-serif">ஒவ்வொரு எழுத்துக்கும் வீடு</div><div class="en">Tamil Sangam MN</div></div>
+    <div class="sc" lang="ru"><div class="nm">Cyrillic</div><div class="tx" style="font-family:Baskerville,serif">Каждой букве — дом</div><div class="en">Baskerville</div></div>
+    <div class="sc" lang="zh-Hans"><div class="nm">Chinese <i>simplified</i></div><div class="tx" style="font-family:'PingFang SC','Hiragino Sans GB',sans-serif">每个字都有家</div><div class="en">PingFang SC</div></div>
+    <div class="sc" lang="ko"><div class="nm">Korean <i>Hangul</i></div><div class="tx" style="font-family:'Apple SD Gothic Neo',sans-serif">모든 글자에 집을</div><div class="en">Apple SD Gothic Neo</div></div>
+    <div class="sc"><div class="nm">IPA <i>phonetics</i></div><div class="tx" style="font-family:'Charis SIL','Hoefler Text','Times New Roman',serif">/taɪp ɪz ˈkræft/</div><div class="en">International Phonetic Alphabet</div></div>
+    <div class="sc" lang="hy"><div class="nm">Armenian</div><div class="tx" style="font-family:'SF Armenian',sans-serif">Ամեն տառին՝ տուն</div><div class="en">SF Armenian</div></div>
+    <div class="sc" lang="ka"><div class="nm">Georgian</div><div class="tx" style="font-family:'SF Georgian',sans-serif">ყველა ასოს — სახლი</div><div class="en">SF Georgian</div></div>
+    <div class="sc" lang="ta"><div class="nm">Tamil</div><div class="tx" style="font-family:'Tamil Sangam MN',sans-serif">எழுத்துக்கு வீடு</div><div class="en">Tamil Sangam MN</div></div>
   </div>
   <div>
-    <div class="sc" lang="ja" style="border-top:none;padding:0"><div class="nm">Japanese <i>vertical</i></div>
+    <div class="sc" lang="ja" style="border-top:none;padding:0"><div class="nm">Japanese</div>
       <div class="jp-wrap" style="margin-top:6pt"><div class="jp-block">すべての文字に、<br>よい家を。<br>縦書きで読む。</div></div>
       <div class="en" style="margin-top:6pt">Hiragino Mincho ProN, writing-mode: vertical-rl</div>
     </div>
@@ -706,13 +718,13 @@ a.box { position: absolute; display: block; color: transparent; font-size: 1pt; 
   <div class="kicker">Chapter eight</div>
   <h2 class="sec" id="h-code">Code &amp; <em>Images</em></h2>
   <p class="dek">A monospaced listing with syntax colouring, and the raster that it describes.</p>
-<pre class="code"><span class="ln">1</span><span class="c">// Escape-time rendering of the Mandelbrot set into an RGB buffer.</span>
+<pre class="code"><span class="ln">1</span><span class="c">// Escape-time rendering of Seahorse Valley into an RGB buffer.</span>
 <span class="ln">2</span><span class="k">fn</span> <span class="f">mandelbrot</span>(width: <span class="ty">u32</span>, height: <span class="ty">u32</span>) -&gt; <span class="ty">Vec</span>&lt;<span class="ty">u8</span>&gt; {
 <span class="ln">3</span>    <span class="k">let mut</span> rgb = <span class="ty">Vec</span>::<span class="f">with_capacity</span>((width * height * <span class="m">3</span>) <span class="k">as</span> <span class="ty">usize</span>);
 <span class="ln">4</span>    <span class="k">for</span> py <span class="k">in</span> <span class="m">0</span>..height {
 <span class="ln">5</span>        <span class="k">for</span> px <span class="k">in</span> <span class="m">0</span>..width {
-<span class="ln">6</span>            <span class="k">let</span> c = (<span class="m">-2.2</span> + <span class="m">3.0</span> * px <span class="k">as</span> <span class="ty">f64</span> / width <span class="k">as</span> <span class="ty">f64</span>,
-<span class="ln">7</span>                     <span class="m">-1.5</span> + <span class="m">3.0</span> * py <span class="k">as</span> <span class="ty">f64</span> / height <span class="k">as</span> <span class="ty">f64</span>);
+<span class="ln">6</span>            <span class="k">let</span> c = (<span class="n">CX</span> + <span class="n">SPAN</span> * (px <span class="k">as</span> <span class="ty">f64</span> / width <span class="k">as</span> <span class="ty">f64</span> - <span class="m">0.5</span>),
+<span class="ln">7</span>                     <span class="n">CY</span> - <span class="n">SPAN</span> * (py <span class="k">as</span> <span class="ty">f64</span> / height <span class="k">as</span> <span class="ty">f64</span> - <span class="m">0.5</span>));
 <span class="ln">8</span>            <span class="k">let</span> (<span class="k">mut</span> z, <span class="k">mut</span> n) = ((<span class="m">0.0</span>, <span class="m">0.0</span>), <span class="m">0</span>);
 <span class="ln">9</span>            <span class="k">while</span> n &lt; <span class="n">MAX_ITER</span> &amp;&amp; z.<span class="m">0</span> * z.<span class="m">0</span> + z.<span class="m">1</span> * z.<span class="m">1</span> &lt;= <span class="m">4.0</span> {
 <span class="ln">10</span>               z = (z.<span class="m">0</span> * z.<span class="m">0</span> - z.<span class="m">1</span> * z.<span class="m">1</span> + c.<span class="m">0</span>, <span class="m">2.0</span> * z.<span class="m">0</span> * z.<span class="m">1</span> + c.<span class="m">1</span>);

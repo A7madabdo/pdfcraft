@@ -4,7 +4,9 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -36,9 +38,7 @@ pub fn find(explicit: Option<&Path>) -> Result<PathBuf> {
     .map(PathBuf::from)
     .collect();
     if let Some(home) = env::var_os("HOME") {
-        candidates.push(
-            Path::new(&home).join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        );
+        candidates.push(Path::new(&home).join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"));
     }
     for var in ["ProgramFiles", "ProgramFiles(x86)", "LocalAppData"] {
         if let Some(base) = env::var_os(var) {
@@ -51,16 +51,8 @@ pub fn find(explicit: Option<&Path>) -> Result<PathBuf> {
         return Ok(found);
     }
 
-    let names = [
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium",
-        "chromium-browser",
-        "chrome",
-        "chrome.exe",
-        "msedge",
-    ];
-    let path = env::var_os("PATH").unwrap_or_else(OsString::new);
+    let names = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome", "chrome.exe", "msedge"];
+    let path = env::var_os("PATH").unwrap_or_default();
     for dir in env::split_paths(&path) {
         for name in names {
             let candidate = dir.join(name);
@@ -77,37 +69,54 @@ pub fn find(explicit: Option<&Path>) -> Result<PathBuf> {
 
 /// Print `html` to `pdf` with headless Chrome. Chrome emits a tagged PDF and,
 /// with `--generate-pdf-document-outline`, bookmarks built from the headings.
-pub fn print_to_pdf(chrome: &Path, html: &Path, pdf: &Path, profile_dir: &Path) -> Result<()> {
+///
+/// Some Chrome builds finish writing the PDF but linger afterwards, so rather
+/// than only waiting for exit we poll for a complete file and then stop Chrome.
+pub fn print_to_pdf(chrome: &Path, html: &Path, pdf: &Path, log: &Path) -> Result<()> {
     if pdf.exists() {
         fs::remove_file(pdf).with_context(|| format!("removing stale {}", pdf.display()))?;
     }
     let mut print_arg = OsString::from("--print-to-pdf=");
     print_arg.push(pdf);
-    let mut profile_arg = OsString::from("--user-data-dir=");
-    profile_arg.push(profile_dir);
+    let log_file = fs::File::create(log).with_context(|| format!("creating {}", log.display()))?;
 
-    let output = Command::new(chrome)
+    let mut child = Command::new(chrome)
         .arg("--headless=new")
         .arg("--disable-gpu")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--allow-file-access-from-files")
         .arg("--no-pdf-header-footer")
         .arg("--generate-pdf-document-outline")
-        .arg(profile_arg)
         .arg(print_arg)
         .arg(super::file_url(html))
-        .output()
+        .stdout(Stdio::null())
+        .stderr(log_file)
+        .spawn()
         .with_context(|| format!("running {}", chrome.display()))?;
 
-    let ok = output.status.success() && fs::metadata(pdf).map(|m| m.len() > 0).unwrap_or(false);
-    if !ok {
-        bail!(
-            "Chrome did not produce {} (status {}):\n{}",
-            pdf.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let started = Instant::now();
+    let mut last_len = None;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if is_complete(pdf) {
+                return Ok(());
+            }
+            bail!("Chrome exited with {status} without writing {}; see {}", pdf.display(), log.display());
+        }
+        let len = fs::metadata(pdf).map(|m| m.len()).ok();
+        if len.is_some() && len == last_len && is_complete(pdf) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(());
+        }
+        last_len = len;
+        if started.elapsed() > Duration::from_secs(120) {
+            let _ = child.kill();
+            bail!("Chrome timed out printing {}; see {}", html.display(), log.display());
+        }
+        thread::sleep(Duration::from_millis(500));
     }
-    Ok(())
+}
+
+/// A PDF is complete once its trailer's `%%EOF` marker has been written.
+fn is_complete(pdf: &Path) -> bool {
+    fs::read(pdf).map(|bytes| bytes.len() > 1024 && bytes[bytes.len() - 1024..].windows(5).any(|w| w == b"%%EOF")).unwrap_or(false)
 }

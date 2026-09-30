@@ -60,8 +60,7 @@ pub fn enhance(doc: &mut Document, now: Stamp) -> Result<Summary> {
             }
             seen.push(uri.clone());
             let kind_str = uri[MARKER_PREFIX.len()..].split('/').next().unwrap_or_default();
-            let kind = Kind::from_marker(kind_str)
-                .with_context(|| format!("unknown annotation marker {uri} on page {}", index + 1))?;
+            let kind = Kind::from_marker(kind_str).with_context(|| format!("unknown annotation marker {uri} on page {}", index + 1))?;
             let struct_parent = doc.get_dictionary(id)?.get(b"StructParent").ok().cloned();
             let built = annotator.build(doc, page, id, kind, r);
             let mut dict = built.dict;
@@ -112,13 +111,7 @@ pub fn enhance(doc: &mut Document, now: Stamp) -> Result<Summary> {
     let form_page = form::build(
         doc,
         &mut annotator,
-        FormInputs {
-            fonts: &fonts,
-            pages_root,
-            contents_page: pages[PAGE_CONTENTS],
-            print_only_ocg: ocg_notes,
-            folio: "10",
-        },
+        FormInputs { fonts: &fonts, pages_root, contents_page: pages[PAGE_CONTENTS], print_only_ocg: ocg_notes, folio: "10" },
     );
     {
         let root = doc.get_dictionary_mut(pages_root)?;
@@ -261,13 +254,7 @@ fn add_resource(doc: &mut Document, page: ObjectId, category: &str, key: &str, v
 fn add_watermark(doc: &mut Document, page: ObjectId, ocg: ObjectId, fonts: &Fonts) -> Result<()> {
     add_resource(doc, page, "Properties", "PCDraft", Object::Reference(ocg))?;
     add_resource(doc, page, "Font", "PCDraftFont", Object::Reference(fonts.id(Font::HelvBold)))?;
-    add_resource(
-        doc,
-        page,
-        "ExtGState",
-        "PCDraftGS",
-        dictionary! { "Type" => "ExtGState", "ca" => 0.09, "CA" => 0.09 }.into(),
-    )?;
+    add_resource(doc, page, "ExtGState", "PCDraftGS", dictionary! { "Type" => "ExtGState", "ca" => 0.09, "CA" => 0.09 }.into())?;
 
     let size = 150.0f32;
     let word = "DRAFT";
@@ -281,10 +268,7 @@ fn add_watermark(doc: &mut Document, page: ObjectId, ocg: ObjectId, fonts: &Font
     c.raw("Q").save();
     c.raw("/OC /PCDraft BDC /Artifact << /Type /Pagination /Subtype /Watermark >> BDC");
     c.gs("PCDraftGS").fill_color(colors::ACCENT);
-    c.raw(&format!(
-        "BT /PCDraftFont {size} Tf {cos:.4} {sin:.4} {:.4} {cos:.4} {x:.2} {y:.2} Tm (DRAFT) Tj ET",
-        -sin
-    ));
+    c.raw(&format!("BT /PCDraftFont {size} Tf {cos:.4} {sin:.4} {:.4} {cos:.4} {x:.2} {y:.2} Tm (DRAFT) Tj ET", -sin));
     c.raw("EMC EMC").restore();
 
     let open = doc.add_object(Stream::new(Dictionary::new(), b"q\n".to_vec()));
@@ -304,12 +288,10 @@ fn add_watermark(doc: &mut Document, page: ObjectId, ocg: ObjectId, fonts: &Font
     Ok(())
 }
 
-/// Keep Chrome's heading-based outline and add the form page; if Chrome did not
-/// produce one, build a flat outline of the chapters.
+/// Keep Chrome's heading-based outline (tidying its titles) and add the form
+/// page next to the other chapters; if Chrome produced none, build one.
 fn extend_outline(doc: &mut Document, pages: &[ObjectId], form_page: ObjectId) -> Result<String> {
-    let dest = |page: ObjectId| -> Object {
-        vec![Object::Reference(page), name("XYZ"), 0.into(), 792.into(), Object::Null].into()
-    };
+    let dest = |page: ObjectId, top: i64| -> Object { vec![Object::Reference(page), name("XYZ"), 0.into(), top.into(), Object::Null].into() };
     let existing = doc
         .catalog()?
         .get(b"Outlines")
@@ -317,45 +299,112 @@ fn extend_outline(doc: &mut Document, pages: &[ObjectId], form_page: ObjectId) -
         .ok()
         .filter(|id| doc.get_dictionary(*id).map(|d| d.has(b"First")).unwrap_or(false));
 
-    let (root, description) = match existing {
-        Some(root) => (root, "Chrome headings + form page"),
+    let (chapter_parent, description) = match existing {
+        Some(root) => {
+            let mut items = Vec::new();
+            collect_outline(doc, root, &mut items);
+            let mut parent = root;
+            for id in items {
+                let dict = doc.get_dictionary_mut(id)?;
+                let title = decode_text(dict.get(b"Title").and_then(Object::as_str).unwrap_or_default());
+                if title == "Review & Markup" {
+                    parent = dict.get(b"Parent").and_then(Object::as_reference).unwrap_or(root);
+                }
+                let tidy = tidy_title(&title);
+                if tidy != title {
+                    dict.set("Title", text(&tidy));
+                }
+            }
+            (parent, "Chrome headings (tidied) + form page")
+        }
         None => {
             let root = doc.add_object(dictionary! { "Type" => "Outlines", "Count" => 0 });
             let chapters = [
-                ("Cover", 0),
-                ("Contents", 1),
-                ("Foreword", 2),
-                ("1  Setting Text", 3),
-                ("2  OpenType Features", 4),
-                ("3  Expressive Type", 5),
-                ("4  Scripts of the World", 6),
-                ("5  Mathematics", 7),
-                ("6  Vector Graphics", 8),
-                ("7  Data & Tables", 9),
-                ("8  Code & Images", 10),
-                ("9  Review & Markup", 11),
+                "Cover",
+                "Contents",
+                "Foreword",
+                "Setting Text",
+                "OpenType Features",
+                "Expressive Type",
+                "Scripts of the World",
+                "Mathematics",
+                "Vector Graphics",
+                "Data & Tables",
+                "Code & Images",
+                "Review & Markup",
             ];
-            for (title, index) in chapters {
-                append_outline_item(doc, root, title, dest(pages[index]), None)?;
+            for (index, title) in chapters.into_iter().enumerate() {
+                append_outline_item(doc, root, title, dest(pages[index], 792), None)?;
             }
             doc.catalog_mut()?.set("Outlines", root);
             (root, "built by xtask (Chrome emitted none)")
         }
     };
 
-    let form_item = append_outline_item(doc, root, "10  Interactive Form", dest(form_page), Some(colors::ACCENT.array()))?;
+    let form_item = append_outline_item(doc, chapter_parent, "Interactive Form", dest(form_page, 792), Some(colors::ACCENT.array()))?;
     for (title, top) in [("Contact", 620), ("Preferences", 426), ("Actions & signature", 240)] {
-        let d: Object = vec![Object::Reference(form_page), name("XYZ"), 0.into(), top.into(), Object::Null].into();
-        append_outline_item(doc, form_item, title, d, None)?;
+        append_outline_item(doc, form_item, title, dest(form_page, top), None)?;
     }
-    // Leave the form entry collapsed: a negative /Count means closed.
-    let kids = doc.get_dictionary(form_item)?.get(b"Count")?.as_i64()?;
-    doc.get_dictionary_mut(form_item)?.set("Count", -kids.abs());
+    let root = doc.catalog()?.get(b"Outlines")?.as_reference()?;
     let total = count_outline(doc, root);
     Ok(format!("{description}, {total} entries"))
 }
 
-/// Append a child item to outline node `parent`, updating First/Last/Count.
+/// Every outline item below `node`, depth first.
+fn collect_outline(doc: &Document, node: ObjectId, out: &mut Vec<ObjectId>) {
+    let next = |id: ObjectId, key: &[u8]| doc.get_dictionary(id).ok().and_then(|d| d.get(key).and_then(Object::as_reference).ok());
+    let mut cur = next(node, b"First");
+    while let Some(id) = cur {
+        out.push(id);
+        collect_outline(doc, id, out);
+        cur = next(id, b"Next");
+    }
+}
+
+/// Decode a PDF text string (UTF-16BE with BOM, else treated as Latin-1).
+fn decode_text(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        bytes.iter().map(|&b| b as char).collect()
+    }
+}
+
+/// Chrome copies CSS `text-transform: uppercase` into bookmark titles; turn
+/// all-caps headings back into sentence case (keeping acronyms).
+fn tidy_title(title: &str) -> String {
+    const ACRONYMS: &[&str] = &["PDF"];
+    // Chrome drops the <br> between the two lines of the cover title.
+    if title == "PrintCraftShowcase" {
+        return TITLE.to_string();
+    }
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.chars().any(char::is_lowercase) || !title.chars().any(char::is_uppercase) {
+        return title;
+    }
+    title
+        .split(' ')
+        .enumerate()
+        .map(|(i, word)| {
+            let bare = word.trim_matches(|c: char| !c.is_alphanumeric());
+            if ACRONYMS.contains(&bare) {
+                return word.to_string();
+            }
+            let lower = word.to_lowercase();
+            if i == 0 {
+                let mut chars = lower.chars();
+                chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+            } else {
+                lower
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Append a child item to outline node `parent`, updating First/Last and the
+/// /Count of every open ancestor.
 fn append_outline_item(doc: &mut Document, parent: ObjectId, title: &str, dest: Object, color: Option<Object>) -> Result<ObjectId> {
     let last = doc.get_dictionary(parent)?.get(b"Last").and_then(Object::as_reference).ok();
     let mut item = dictionary! { "Title" => text(title), "Parent" => parent, "Dest" => dest };
@@ -375,9 +424,20 @@ fn append_outline_item(doc: &mut Document, parent: ObjectId, title: &str, dest: 
         p.set("First", id);
     }
     p.set("Last", id);
-    let count = p.get(b"Count").and_then(Object::as_i64).unwrap_or(0);
-    // Open nodes (and the root) count visible descendants positively.
-    p.set("Count", if count < 0 { count - 1 } else { count + 1 });
+
+    // Open nodes count visible descendants (positive); a closed node's negative
+    // count grows in magnitude and hides the change from its ancestors.
+    let mut node = Some(parent);
+    while let Some(n) = node {
+        let d = doc.get_dictionary_mut(n)?;
+        let count = d.get(b"Count").and_then(Object::as_i64).unwrap_or(0);
+        if count < 0 {
+            d.set("Count", count - 1);
+            break;
+        }
+        d.set("Count", count + 1);
+        node = d.get(b"Parent").and_then(Object::as_reference).ok();
+    }
     Ok(id)
 }
 
@@ -403,10 +463,7 @@ fn add_embedded_file_name(doc: &mut Document, file_name: &str, spec: ObjectId) -
             catalog.get_mut(b"Names")?.as_dict_mut()?
         }
     };
-    names.set(
-        "EmbeddedFiles",
-        dictionary! { "Names" => vec![Object::string_literal(file_name), Object::Reference(spec)] },
-    );
+    names.set("EmbeddedFiles", dictionary! { "Names" => vec![Object::string_literal(file_name), Object::Reference(spec)] });
     Ok(())
 }
 
@@ -446,14 +503,7 @@ fn xmp(producer: &str, now: &Stamp) -> String {
     for b in now.iso.bytes().chain(TITLE.bytes()) {
         h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
     }
-    let uuid = format!(
-        "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
-        h >> 32,
-        (h >> 16) & 0xffff,
-        h & 0xfff,
-        (h >> 20) & 0xfff,
-        h & 0xffff_ffff_ffff
-    );
+    let uuid = format!("{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}", h >> 32, (h >> 16) & 0xffff, h & 0xfff, (h >> 20) & 0xfff, h & 0xffff_ffff_ffff);
     let keywords: String = KEYWORDS.iter().map(|k| format!("<rdf:li>{}</rdf:li>", xml_escape(k))).collect();
     format!(
         "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n\

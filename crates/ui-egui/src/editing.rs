@@ -1,0 +1,263 @@
+//! Editing glue: apply engine edits from the UI, undo/redo, save/save-as, and the
+//! "save changes?" prompt when closing a tab or quitting with unsaved edits.
+
+use printcraft_engine::Edit;
+
+use crate::PrintCraftApp;
+
+/// What the user was doing when we asked whether to save.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseRequest {
+    /// Close this tab (index into `views`).
+    Tab(usize),
+    /// Quit the application once every dirty document is resolved.
+    Quit,
+}
+
+/// Where Save writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveTarget {
+    /// The file's own path; asks for one if the document has none (e.g. opened from bytes).
+    InPlace,
+    /// Always ask for a new location.
+    As,
+}
+
+impl PrintCraftApp {
+    /// Apply an edit to the active document. Returns `true` on success; failures are shown.
+    pub fn apply_edit(&mut self, edit: Edit) -> bool {
+        let Some((i, id)) = self.active_ids() else { return false };
+        let label = edit.label();
+        match self.session.apply(id, edit.clone()) {
+            Ok(()) => {
+                let info = &self.session.get(id).expect("exists").info;
+                let view = &mut self.views[i];
+                view.document_changed(info);
+                // Keep the pages the user acted on selected, where they now are.
+                match edit {
+                    Edit::MovePages { pages, to } => {
+                        let n = pages.iter().collect::<std::collections::BTreeSet<_>>().len();
+                        let to = to.min(info.pages.len() - n);
+                        view.select_pages(&(to..to + n).collect::<Vec<_>>());
+                    }
+                    Edit::InsertBlankPage { at, .. } => view.select_pages(&[at.min(info.pages.len() - 1)]),
+                    Edit::DeletePages { .. } => view.select_pages(&[]),
+                    _ => {}
+                }
+                true
+            }
+            Err(e) => {
+                self.notify(format!("{label} failed: {e}"));
+                false
+            }
+        }
+    }
+
+    pub fn undo(&mut self) {
+        self.history_step(true);
+    }
+
+    pub fn redo(&mut self) {
+        self.history_step(false);
+    }
+
+    fn history_step(&mut self, undo: bool) {
+        let Some((i, id)) = self.active_ids() else { return };
+        let result = if undo { self.session.undo(id) } else { self.session.redo(id) };
+        match result {
+            Ok(label) => {
+                let info = &self.session.get(id).expect("exists").info;
+                self.views[i].document_changed(info);
+                self.notify(format!("{} {label}", if undo { "Undid" } else { "Redid" }));
+            }
+            Err(e) => self.notify(e.to_string()),
+        }
+    }
+
+    /// Apply any edit a view queued this frame (organize toolbar, keys).
+    pub(crate) fn process_pending_edits(&mut self) {
+        let Some(i) = self.active else { return };
+        if let Some(edit) = self.views.get_mut(i).and_then(|v| v.pending_edit.take()) {
+            self.apply_edit(edit);
+        }
+    }
+
+    /// Save the active document. Returns `true` if it was written.
+    pub fn save_active(&mut self, target: SaveTarget) -> bool {
+        match self.active {
+            Some(i) => self.save_view(i, target),
+            None => false,
+        }
+    }
+
+    /// Save the document shown in tab `index`. Returns `true` if it was written.
+    pub fn save_view(&mut self, index: usize, target: SaveTarget) -> bool {
+        let Some(id) = self.views.get(index).map(|v| v.id) else { return false };
+        let Some(doc) = self.session.get(id) else { return false };
+        let (name, path) = (doc.name.clone(), doc.path.clone());
+        let bytes = match self.session.save_bytes(id) {
+            Ok(b) => b,
+            Err(e) => {
+                self.notify(format!("Couldn't save {name}: {e}"));
+                return false;
+            }
+        };
+        let destination = match (target, path, &self.save_override) {
+            (_, _, Some(p)) => Some(p.clone()),
+            (SaveTarget::InPlace, Some(p), _) => Some(p),
+            _ => self.ask_save_path(&name),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(dest) = destination else { return false };
+            if let Err(e) = write_atomically(&dest, &bytes) {
+                self.notify(format!("Couldn't save {dest}: {e}"));
+                return false;
+            }
+            match self.session.mark_saved(id, bytes, Some(dest.clone())) {
+                Ok(()) => {
+                    let info = &self.session.get(id).expect("exists").info;
+                    self.views[index].document_changed(info);
+                    self.notify(format!("Saved {}", short_name(&dest)));
+                    true
+                }
+                Err(e) => {
+                    self.notify(format!("Saved, but reopening failed: {e}"));
+                    false
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = destination;
+            match download(&name, &bytes) {
+                Ok(()) => {
+                    let _ = self.session.mark_saved(id, bytes, None);
+                    let info = &self.session.get(id).expect("exists").info;
+                    self.views[index].document_changed(info);
+                    self.notify(format!("Downloaded {name}"));
+                    true
+                }
+                Err(e) => {
+                    self.notify(format!("Couldn't download {name}: {e}"));
+                    false
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ask_save_path(&self, name: &str) -> Option<String> {
+        let name = if name.to_ascii_lowercase().ends_with(".pdf") { name.to_string() } else { format!("{name}.pdf") };
+        rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(name).save_file().map(|p| p.to_string_lossy().into_owned())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn ask_save_path(&self, _name: &str) -> Option<String> {
+        None // browsers download instead
+    }
+
+    /// Close a tab, asking first if it has unsaved changes.
+    pub fn request_close_tab(&mut self, index: usize) {
+        let dirty = self.views.get(index).and_then(|v| self.session.get(v.id)).is_some_and(|d| d.dirty);
+        if dirty {
+            self.close_request = Some(CloseRequest::Tab(index));
+        } else {
+            self.close_tab(index);
+        }
+    }
+
+    /// The first tab with unsaved changes.
+    pub fn first_dirty(&self) -> Option<usize> {
+        self.views.iter().position(|v| self.session.get(v.id).is_some_and(|d| d.dirty))
+    }
+
+    /// Answer the save prompt: `Some(true)` save, `Some(false)` discard, `None` cancel.
+    pub fn resolve_close(&mut self, ctx: &egui::Context, choice: Option<bool>) {
+        let Some(req) = self.close_request.take() else { return };
+        let index = match req {
+            CloseRequest::Tab(i) => i,
+            CloseRequest::Quit => match self.first_dirty() {
+                Some(i) => i,
+                None => {
+                    self.quit(ctx);
+                    return;
+                }
+            },
+        };
+        match choice {
+            None => {} // cancelled: nothing closes
+            Some(save) => {
+                if save && !self.save_view(index, SaveTarget::InPlace) {
+                    return; // save failed or was cancelled: keep the document open
+                }
+                self.close_tab(index);
+                if req == CloseRequest::Quit {
+                    // Ask about the next dirty document, or quit.
+                    match self.first_dirty() {
+                        Some(_) => self.close_request = Some(CloseRequest::Quit),
+                        None => self.quit(ctx),
+                    }
+                }
+            }
+        }
+    }
+
+    fn quit(&mut self, ctx: &egui::Context) {
+        self.allow_quit = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Intercept window close while documents have unsaved changes.
+    pub(crate) fn guard_quit(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_quit && self.first_dirty().is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_request = Some(CloseRequest::Quit);
+        }
+    }
+}
+
+/// Write via a temporary file in the same directory and rename over the target, so a crash or
+/// full disk never leaves a half-written PDF where the original was.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_atomically(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let target = std::path::Path::new(path);
+    let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let tmp = dir.join(format!(".{}.printcraft-{}.tmp", target.file_name().and_then(|n| n.to_str()).unwrap_or("save"), std::process::id()));
+    let result = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn short_name(path: &str) -> String {
+    std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
+}
+
+/// Offer bytes as a browser download.
+#[cfg(target_arch = "wasm32")]
+fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
+    use wasm_bindgen::JsCast;
+    let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::of1(&array);
+    let opts = web_sys::BlobPropertyBag::new();
+    opts.set_type("application/pdf");
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts).map_err(err)?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(err)?;
+    let document = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
+    let a: web_sys::HtmlAnchorElement = document.create_element("a").map_err(err)?.dyn_into().map_err(|_| "anchor")?;
+    a.set_href(&url);
+    a.set_download(name);
+    a.click();
+    let _ = web_sys::Url::revoke_object_url(&url);
+    Ok(())
+}

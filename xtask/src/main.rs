@@ -3,15 +3,21 @@
 use std::process::ExitCode;
 
 mod demo_pdf;
+mod gates;
+mod layers;
 
 type Command = fn(&[String]) -> anyhow::Result<()>;
 
 /// Every subcommand: name, one-line summary, entry point.
-const COMMANDS: &[(&str, &str, Command)] = &[(
-    "demo-pdf",
-    "Build dist/demo/printcraft-showcase.pdf (needs Google Chrome or Chromium)",
-    demo_pdf::run,
-)];
+const COMMANDS: &[(&str, &str, Command)] = &[
+    ("layers", "Enforce the crate dependency layering (plan/architecture.md §3)", gates::layers),
+    ("wasm", "cargo check --target wasm32-unknown-unknown for every crate below L8", gates::wasm),
+    ("ci", "fmt --check, clippy -D warnings, test, layers, wasm (stops at first failure)", gates::ci),
+    ("corpus", "Fetch test corpora into corpus/ (git-ignored): pdf.js test PDFs", gates::corpus),
+    ("check", "Robustness sweep over corpus/ with printcraft-cli; fails on crashes or regressions vs xtask/baselines", gates::check),
+    ("text-oracle", "Compare text extraction with pdftotext over corpus/ (word F1; target median ≥ 0.97)", gates::text_oracle),
+    ("demo-pdf", "Build dist/demo/printcraft-showcase.pdf (needs Google Chrome or Chromium)", demo_pdf::run),
+];
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

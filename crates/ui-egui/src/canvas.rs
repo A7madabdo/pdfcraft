@@ -4,14 +4,16 @@
 //! Page images come from the engine's render pool as whole-page rasters at the current zoom;
 //! stale rasters are shown stretched until the sharp one arrives (tiling comes in M3.3).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::Range;
+use std::sync::Arc;
 
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2, pos2, vec2};
-use printcraft_engine::DocId;
-use printcraft_render::{DocInfo, LinkTarget, RenderPool, RenderRequest};
+use printcraft_engine::{DocId, Edit};
+use printcraft_render::{DocInfo, LinkTarget, PageText, RenderPool, RenderRequest, RequestKind, Tile};
 
 use crate::theme::{self, Tokens};
-use crate::{PrintCraftApp, QuickTool, RightPanel, icons};
+use crate::{PrintCraftApp, QuickTool, RightPanel, icons, widgets};
 
 /// Logical pixels per PDF point at 100% (96 dpi, like browsers).
 pub const PT: f32 = 96.0 / 72.0;
@@ -20,6 +22,12 @@ const MARGIN: f32 = 28.0;
 /// Horizontal gutter that keeps pages clear of the floating quick-action bar.
 const SIDE: f32 = 70.0;
 const THUMB_TAG: u64 = 1 << 63;
+const TEXT_TAG: u64 = 1 << 62;
+/// Pages whose raster would exceed this many device pixels on a side are drawn in tiles.
+const TILE_THRESHOLD: f32 = 4096.0;
+const TILE: u32 = 1024;
+/// Longest side of the low-resolution backdrop drawn under tiles.
+const BASE_SIDE: f32 = 2048.0;
 const THUMB_W: f32 = 132.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +44,31 @@ pub enum PageLayout {
     Single,
 }
 
+/// The find bar (⌘F): query, matches across the document, current match.
+#[derive(Default)]
+pub struct Find {
+    pub query: String,
+    /// (page, glyph range) in document order.
+    pub matches: Vec<(usize, Range<usize>)>,
+    pub current: Option<usize>,
+    pub focus: bool,
+    pub case_query: String,
+}
+
+/// A text selection on one page, in reading-order glyph indices.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Selection {
+    page: usize,
+    anchor: usize,
+    head: usize,
+}
+
+impl Selection {
+    fn range(&self) -> Range<usize> {
+        self.anchor.min(self.head)..self.anchor.max(self.head) + 1
+    }
+}
+
 struct PageTex {
     tag: u64,
     tex: TextureHandle,
@@ -46,6 +79,8 @@ pub struct DocView {
     pub zoom: f32,
     pub fit: Fit,
     pub layout: PageLayout,
+    /// View rotation in degrees clockwise (0, 90, 180, 270); display only, never saved.
+    pub rotation: u16,
     pub current: usize,
     pub organize: bool,
     pub highlight_fields: bool,
@@ -56,11 +91,37 @@ pub struct DocView {
     /// Briefly outline an annotation after navigating to it from a panel.
     pub flash: Option<(usize, [f32; 4], f64)>,
     pages: HashMap<usize, PageTex>,
+    /// Pages the renderer could not draw, with the reason (never re-requested).
+    errors: HashMap<usize, String>,
+    /// When each still-missing page was first shown, to flag unusually slow renders.
+    waiting_since: HashMap<usize, f64>,
     thumbs: HashMap<usize, TextureHandle>,
+    /// Sharp tiles of large pages: (page, tile x, tile y) → (scale tag, texture).
+    tiles: HashMap<(usize, u32, u32), (u64, TextureHandle)>,
+    /// Text layers, extracted in the background on demand (selection, find, copy).
+    texts: HashMap<usize, Arc<PageText>>,
+    text_failed: HashSet<usize>,
+    pub find: Option<Find>,
+    selection: Option<Selection>,
     last_queue: Vec<RenderRequest>,
     viewport_w: f32,
     viewport_h: f32,
     page_count: usize,
+    /// Page heights in points (view space), for mapping text positions to scroll offsets.
+    page_heights: Vec<f32>,
+    /// Screen rects of the pages drawn last frame (hit-testing, tests, automation).
+    screen_rects: Vec<(usize, Rect)>,
+    screen_xforms: Vec<(usize, PageXform)>,
+    /// The scroll viewport on screen last frame.
+    viewport_screen: Rect,
+    /// Pending zoom anchor: page, position within it (0..1), and offset from the viewport corner.
+    zoom_anchor: Option<(usize, f32, f32, Vec2)>,
+    /// Pages selected in the organize grid (0-based). Empty means "the current page".
+    pub selected: BTreeSet<usize>,
+    /// Anchor for ⇧-click range selection in the organize grid.
+    select_anchor: Option<usize>,
+    /// An edit requested by the view (organize toolbar, keys), applied by the app this frame.
+    pub pending_edit: Option<Edit>,
 }
 
 impl DocView {
@@ -70,6 +131,7 @@ impl DocView {
             zoom: 1.0,
             fit: Fit::Width,
             layout: PageLayout::Continuous,
+            rotation: 0,
             current: 0,
             organize: false,
             highlight_fields: false,
@@ -78,12 +140,163 @@ impl DocView {
             goto: None,
             flash: None,
             pages: HashMap::new(),
+            errors: HashMap::new(),
+            waiting_since: HashMap::new(),
             thumbs: HashMap::new(),
+            tiles: HashMap::new(),
+            texts: HashMap::new(),
+            text_failed: HashSet::new(),
+            find: None,
+            selection: None,
             last_queue: Vec::new(),
             viewport_w: 800.0,
             viewport_h: 600.0,
             page_count: info.pages.len(),
+            page_heights: info.pages.iter().map(|p| p.height).collect(),
+            screen_rects: Vec::new(),
+            screen_xforms: Vec::new(),
+            viewport_screen: Rect::NOTHING,
+            zoom_anchor: None,
+            selected: BTreeSet::new(),
+            select_anchor: None,
+            pending_edit: None,
         }
+    }
+
+    /// The document's content or page list changed (an edit, undo or redo): drop caches and
+    /// adopt the new page geometry, keeping the reader's place where possible.
+    pub fn document_changed(&mut self, info: &DocInfo) {
+        self.invalidate_content();
+        self.page_count = info.pages.len();
+        self.page_heights = info.pages.iter().map(|p| p.height).collect();
+        let last = self.page_count.saturating_sub(1);
+        self.current = self.current.min(last);
+        self.page_input = (self.current + 1).to_string();
+        self.selected.retain(|p| *p <= last);
+        if self.select_anchor.is_some_and(|a| a > last) {
+            self.select_anchor = None;
+        }
+        self.goto = None;
+        self.zoom_anchor = None;
+        self.flash = None;
+    }
+
+    /// Pages an organize command acts on: the selection, or the current page.
+    pub fn target_pages(&self) -> Vec<usize> {
+        if self.selected.is_empty() { vec![self.current] } else { self.selected.iter().copied().collect() }
+    }
+
+    /// Select pages in the organize grid (tests, automation). Empty clears the selection.
+    pub fn select_pages(&mut self, pages: &[usize]) {
+        self.selected = pages.iter().copied().filter(|p| *p < self.page_count).collect();
+        if let Some(first) = self.selected.first() {
+            self.current = *first;
+        }
+    }
+
+    pub fn render_pending(&self) -> bool {
+        !self.last_queue.is_empty()
+    }
+
+    /// Drop every cached raster and text layer (the document's appearance changed, e.g. a layer
+    /// was toggled). Pages re-render on the next frame; the old textures are simply released.
+    pub fn invalidate_content(&mut self) {
+        self.pages.clear();
+        self.thumbs.clear();
+        self.tiles.clear();
+        self.texts.clear();
+        self.text_failed.clear();
+        self.errors.clear();
+        self.waiting_since.clear();
+        self.last_queue.clear();
+        self.selection = None;
+        if let Some(f) = self.find.as_mut() {
+            f.matches.clear();
+            f.current = None;
+        }
+    }
+
+    /// Open the find bar (or focus it if already open).
+    pub fn open_find(&mut self) {
+        let f = self.find.get_or_insert_with(Find::default);
+        f.focus = true;
+    }
+
+    /// Re-run the search on all pages whose text is known (after the query changed).
+    pub fn rerun_find(&mut self) {
+        let Some(f) = self.find.as_mut() else { return };
+        f.case_query = f.query.clone();
+        f.matches.clear();
+        f.current = None;
+        let pages: Vec<usize> = self.texts.keys().copied().collect();
+        for p in pages {
+            self.refresh_find_page(p);
+        }
+    }
+
+    fn refresh_find_page(&mut self, page: usize) {
+        let (Some(f), Some(text)) = (self.find.as_mut(), self.texts.get(&page)) else { return };
+        if f.case_query.trim().is_empty() {
+            return;
+        }
+        let current_key = f.current.and_then(|c| f.matches.get(c).cloned());
+        f.matches.retain(|(p, _)| *p != page);
+        f.matches.extend(text.find(&f.case_query).into_iter().map(|r| (page, r)));
+        f.matches.sort_by_key(|(p, r)| (*p, r.start));
+        f.current = match current_key {
+            Some(k) => f.matches.iter().position(|m| *m == k),
+            None => None,
+        };
+        if f.current.is_none() && !f.matches.is_empty() {
+            // First match at or after the page being viewed.
+            let cur = self.current;
+            let i = f.matches.iter().position(|(p, _)| *p >= cur).unwrap_or(0);
+            f.current = Some(i);
+            let (p, _) = f.matches[i];
+            self.flash_match(p);
+        }
+    }
+
+    /// Move to the next/previous match.
+    pub fn find_step(&mut self, forward: bool) {
+        let Some(f) = self.find.as_mut() else { return };
+        if f.matches.is_empty() {
+            return;
+        }
+        let n = f.matches.len();
+        let c = f.current.unwrap_or(0);
+        let next = if forward { (c + 1) % n } else { (c + n - 1) % n };
+        f.current = Some(next);
+        let p = f.matches[next].0;
+        self.flash_match(p);
+    }
+
+    fn flash_match(&mut self, page: usize) {
+        let frac = self
+            .find
+            .as_ref()
+            .and_then(|f| f.current.and_then(|c| f.matches.get(c)))
+            .and_then(|(p, r)| self.texts.get(p).and_then(|t| t.glyphs.get(r.start)).map(|g| g.rect[1]))
+            .zip(self.page_heights.get(page).copied())
+            .map(|(y, h)| ((y - 60.0) / h).clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        self.goto = Some((page, frac));
+        self.current = page;
+    }
+
+    /// Screen position of the centre of glyph `glyph` on `page`, if that page is on screen and its
+    /// text layer is loaded (used by UI tests and automation to aim pointer input).
+    pub fn glyph_screen_pos(&self, page: usize, glyph: usize) -> Option<Pos2> {
+        let (_, xf) = self.screen_xforms.iter().find(|(p, _)| *p == page)?;
+        let g = self.texts.get(&page)?.glyphs.get(glyph)?;
+        Some(xf.view_rect(g.rect).center())
+    }
+
+    /// Selected text, if any (⌘C).
+    pub fn selected_text(&self) -> Option<String> {
+        let s = self.selection?;
+        let t = self.texts.get(&s.page)?;
+        Some(t.text_of(s.range())).filter(|x| !x.is_empty())
     }
 
     pub fn thumb(&self, page: usize) -> Option<&TextureHandle> {
@@ -97,11 +310,36 @@ impl DocView {
         self.page_input = (page + 1).to_string();
     }
 
+    /// Rotate the view 90° clockwise or counter-clockwise (View ▸ Rotate View, ⇧⌘+ / ⇧⌘−).
+    pub fn rotate_view(&mut self, clockwise: bool) {
+        self.rotation = (self.rotation + if clockwise { 90 } else { 270 }) % 360;
+        self.goto = Some((self.current, 0.0));
+    }
+
+    /// Displayed page size in points for this view rotation.
+    fn display_size(&self, p: &printcraft_render::PageInfo) -> (f32, f32) {
+        if self.rotation % 180 == 90 { (p.height, p.width) } else { (p.width, p.height) }
+    }
+
+    /// Zoom keeping the centre of the view still.
     pub fn set_zoom(&mut self, zoom: f32) {
-        let frac = 0.0;
+        let centre = self.viewport_screen.center();
+        self.zoom_at(zoom, centre);
+    }
+
+    /// Zoom keeping the document point under `screen_pos` still (pinch, ⌘-scroll).
+    pub fn zoom_at(&mut self, zoom: f32, screen_pos: Pos2) {
+        let anchor = self.screen_rects.iter().find(|(_, r)| r.expand(GAP).contains(screen_pos)).map(|(p, r)| {
+            let f = (screen_pos - r.min) / r.size();
+            (*p, f.x.clamp(0.0, 1.0), f.y.clamp(0.0, 1.0), screen_pos - self.viewport_screen.min)
+        });
         self.zoom = zoom.clamp(0.08, 64.0);
         self.fit = Fit::None;
-        self.goto = Some((self.current, frac));
+        match anchor {
+            Some(a) => self.zoom_anchor = Some(a),
+            // Nothing on screen yet (e.g. a launch option): align the current page instead.
+            None => self.goto = Some((self.current, 0.0)),
+        }
     }
 
     /// Standard zoom steps (as in Acrobat's zoom menu).
@@ -117,16 +355,46 @@ impl DocView {
     /// Pull finished renders into textures.
     pub fn receive(&mut self, ctx: &egui::Context, pool: &RenderPool) {
         let mut got = false;
-        while let Some(r) = pool.try_recv() {
+        // Inline (single-threaded, e.g. web) rendering happens inside try_recv: one page per frame.
+        let budget = if pool.is_inline() { 1 } else { usize::MAX };
+        let mut n = 0;
+        while n < budget
+            && let Some(r) = pool.try_recv()
+        {
+            n += 1;
             got = true;
+            if r.request.kind == RequestKind::Text {
+                match r.text {
+                    Some(t) => {
+                        self.texts.insert(r.request.page, t);
+                        self.refresh_find_page(r.request.page);
+                    }
+                    None => {
+                        log::warn!("page {} text: {}", r.request.page + 1, r.error.unwrap_or_default());
+                        self.text_failed.insert(r.request.page);
+                    }
+                }
+                continue;
+            }
+            if let Some(e) = r.error {
+                log::warn!("page {}: {e}", r.request.page + 1);
+                self.errors.insert(r.request.page, e);
+                continue;
+            }
             let img = egui::ColorImage::from_rgba_premultiplied([r.width as usize, r.height as usize], &r.rgba);
             let page = r.request.page;
+            if let Some(t) = r.request.tile {
+                let tex = ctx.load_texture(format!("tile-{:?}-{page}-{}-{}", self.id, t.x, t.y), img, TextureOptions::LINEAR);
+                self.tiles.insert((page, t.x / TILE, t.y / TILE), (r.request.tag, tex));
+                continue;
+            }
             if r.request.tag & THUMB_TAG != 0 {
                 let tex = ctx.load_texture(format!("thumb-{:?}-{page}", self.id), img, TextureOptions::LINEAR);
                 self.thumbs.insert(page, tex);
             } else {
                 let tex = ctx.load_texture(format!("page-{:?}-{page}", self.id), img, TextureOptions::LINEAR);
                 self.pages.insert(page, PageTex { tag: r.request.tag, tex });
+                self.waiting_since.remove(&page);
             }
         }
         if got {
@@ -135,15 +403,15 @@ impl DocView {
     }
 
     fn fit_zoom(&mut self, info: &DocInfo) {
-        let max_w = info.pages.iter().map(|p| p.width).fold(1.0, f32::max);
+        let max_w = info.pages.iter().map(|p| self.display_size(p).0).fold(1.0, f32::max);
         let avail_w = (self.viewport_w - 2.0 * SIDE).max(100.0);
         let per_row = if self.layout == PageLayout::TwoUp { 2.0 } else { 1.0 };
         match self.fit {
             Fit::Width => self.zoom = (avail_w - GAP * (per_row - 1.0)) / (max_w * PT * per_row),
             Fit::Page => {
-                let p = &info.pages[self.current.min(info.pages.len() - 1)];
-                let zw = (avail_w - GAP * (per_row - 1.0)) / (p.width * PT * per_row);
-                let zh = (self.viewport_h - 2.0 * MARGIN) / (p.height * PT);
+                let (w, h) = self.display_size(&info.pages[self.current.min(info.pages.len() - 1)]);
+                let zw = (avail_w - GAP * (per_row - 1.0)) / (w * PT * per_row);
+                let zh = (self.viewport_h - 2.0 * MARGIN) / (h * PT);
                 self.zoom = zw.min(zh);
             }
             Fit::None => {}
@@ -159,14 +427,15 @@ impl DocView {
         match self.layout {
             PageLayout::Continuous | PageLayout::Single => {
                 for p in &info.pages {
-                    let size = vec2(p.width * s, p.height * s);
+                    let (w, h) = self.display_size(p);
+                    let size = vec2(w * s, h * s);
                     rects.push(Rect::from_min_size(pos2(((content_w - size.x) / 2.0).max(SIDE), y), size));
                     y += size.y + GAP;
                 }
             }
             PageLayout::TwoUp => {
                 for pair in info.pages.chunks(2) {
-                    let sizes: Vec<Vec2> = pair.iter().map(|p| vec2(p.width * s, p.height * s)).collect();
+                    let sizes: Vec<Vec2> = pair.iter().map(|p| self.display_size(p)).map(|(w, h)| vec2(w * s, h * s)).collect();
                     let row_w: f32 = sizes.iter().map(|v| v.x).sum::<f32>() + GAP * (sizes.len() as f32 - 1.0);
                     let row_h = sizes.iter().map(|v| v.y).fold(0.0, f32::max);
                     let mut x = ((content_w - row_w) / 2.0).max(SIDE);
@@ -187,32 +456,103 @@ impl DocView {
     }
 }
 
-/// Map a user-space rect on a page to screen space, honouring crop box and rotation.
-pub fn page_to_screen(info: &DocInfo, page: usize, page_rect: Rect, r: [f32; 4]) -> Rect {
-    let p = &info.pages[page];
-    let [cx0, cy0, cx1, cy1] = p.crop;
-    let (cw, ch) = ((cx1 - cx0).max(1.0), (cy1 - cy0).max(1.0));
-    let map = |x: f32, y: f32| -> Pos2 {
-        // Normalised coordinates in the unrotated crop box, y down.
-        let (u, v) = ((x - cx0) / cw, (cy1 - y) / ch);
-        let (u, v) = match p.rotation {
+/// Maps between a page's coordinate spaces and the screen, including view rotation.
+///
+/// *View space* is the page as rendered (points, y down, the document's own `/Rotate` applied);
+/// normalised page coordinates `(u, v)` are view space divided by the page size. The view
+/// rotation (View ▸ Rotate View) turns the page clockwise on screen by `rot` degrees.
+#[derive(Clone, Copy)]
+pub struct PageXform {
+    /// The page's rectangle on screen (already rotated, so width/height may be swapped).
+    pub rect: Rect,
+    pub rot: u16,
+    /// Page size in view space (unrotated by the view).
+    pub pw: f32,
+    pub ph: f32,
+}
+
+impl PageXform {
+    pub fn norm_to_screen(&self, u: f32, v: f32) -> Pos2 {
+        let (a, b) = match self.rot {
             90 => (1.0 - v, u),
             180 => (1.0 - u, 1.0 - v),
             270 => (v, 1.0 - u),
             _ => (u, v),
         };
-        pos2(page_rect.left() + u * page_rect.width(), page_rect.top() + v * page_rect.height())
-    };
-    Rect::from_two_pos(map(r[0], r[1]), map(r[2], r[3]))
+        pos2(self.rect.left() + a * self.rect.width(), self.rect.top() + b * self.rect.height())
+    }
+
+    pub fn screen_to_norm(&self, p: Pos2) -> (f32, f32) {
+        let (a, b) = ((p.x - self.rect.left()) / self.rect.width().max(1e-3), (p.y - self.rect.top()) / self.rect.height().max(1e-3));
+        match self.rot {
+            90 => (b, 1.0 - a),
+            180 => (1.0 - a, 1.0 - b),
+            270 => (1.0 - b, a),
+            _ => (a, b),
+        }
+    }
+
+    /// Screen point → view space (points).
+    pub fn screen_to_view(&self, p: Pos2) -> (f32, f32) {
+        let (u, v) = self.screen_to_norm(p);
+        (u * self.pw, v * self.ph)
+    }
+
+    /// A view-space rect [x0, y0, x1, y1] → screen rect.
+    pub fn view_rect(&self, g: [f32; 4]) -> Rect {
+        Rect::from_two_pos(self.norm_to_screen(g[0] / self.pw, g[1] / self.ph), self.norm_to_screen(g[2] / self.pw, g[3] / self.ph))
+    }
+
+    /// A PDF user-space rect (crop box, document `/Rotate`) → screen rect.
+    pub fn user_rect(&self, info: &DocInfo, page: usize, r: [f32; 4]) -> Rect {
+        let p = &info.pages[page];
+        let [cx0, cy0, cx1, cy1] = p.crop;
+        let (cw, ch) = ((cx1 - cx0).max(1.0), (cy1 - cy0).max(1.0));
+        let norm = |x: f32, y: f32| -> (f32, f32) {
+            let (u, v) = ((x - cx0) / cw, (cy1 - y) / ch);
+            match p.rotation {
+                90 => (1.0 - v, u),
+                180 => (1.0 - u, 1.0 - v),
+                270 => (v, 1.0 - u),
+                _ => (u, v),
+            }
+        };
+        let (a, b) = (norm(r[0], r[1]), norm(r[2], r[3]));
+        Rect::from_two_pos(self.norm_to_screen(a.0, a.1), self.norm_to_screen(b.0, b.1))
+    }
+
+    /// Draw a texture covering the normalised page region, rotated with the view.
+    pub fn paint_image(&self, painter: &egui::Painter, tex: egui::TextureId, u0: f32, v0: f32, u1: f32, v1: f32) {
+        let mut mesh = egui::Mesh::with_texture(tex);
+        let corners = [(u0, v0, 0.0, 0.0), (u1, v0, 1.0, 0.0), (u1, v1, 1.0, 1.0), (u0, v1, 0.0, 1.0)];
+        for (u, v, tu, tv) in corners {
+            mesh.vertices.push(egui::epaint::Vertex { pos: self.norm_to_screen(u, v), uv: pos2(tu, tv), color: Color32::WHITE });
+        }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        painter.add(egui::Shape::mesh(mesh));
+    }
 }
 
 pub fn shortcuts(view: &mut DocView, ctx: &egui::Context) {
     use egui::{Key, KeyboardShortcut, Modifiers};
+    if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F))) {
+        view.open_find();
+    }
     if ctx.egui_wants_keyboard_input() {
         return;
     }
     let cmd = |k| KeyboardShortcut::new(Modifiers::COMMAND, k);
     let pressed = |s: KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(&s));
+    // Rotation first: egui matches ⌘+ loosely with respect to Shift.
+    if pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Plus))
+        || pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Equals))
+    {
+        view.rotate_view(true);
+    }
+    if pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Minus)) {
+        view.rotate_view(false);
+    }
     if pressed(cmd(Key::Plus)) || pressed(cmd(Key::Equals)) {
         view.zoom_step(true);
     }
@@ -230,7 +570,25 @@ pub fn shortcuts(view: &mut DocView, ctx: &egui::Context) {
         view.fit = Fit::Width;
         view.goto = Some((view.current, 0.0));
     }
+    if pressed(cmd(Key::G)) {
+        view.find_step(true);
+    }
+    if pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::G)) {
+        view.find_step(false);
+    }
+    // ⌘C arrives as a Copy event on most platforms.
+    let copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+    if copy && let Some(text) = view.selected_text() {
+        ctx.copy_text(text);
+    }
     let key = |k| ctx.input(|i| i.key_pressed(k));
+    if key(Key::Escape) {
+        if view.selection.is_some() {
+            view.selection = None;
+        } else {
+            view.find = None;
+        }
+    }
     if key(Key::Home) {
         view.go_to_page(0);
     }
@@ -259,7 +617,7 @@ pub fn document_area(app: &mut PrintCraftApp, index: usize, ui: &mut egui::Ui) {
     let view = &mut app.views[index];
     notices(view, info, ui, &t);
     if view.organize {
-        organize_grid(view, info, &doc.renderer, ui, &t);
+        organize_grid(view, info, &doc.renderer, doc.editable(), ui, &t);
         return;
     }
 
@@ -272,10 +630,17 @@ pub fn document_area(app: &mut PrintCraftApp, index: usize, ui: &mut egui::Ui) {
     let zoom_delta = ui.input(|i| i.zoom_delta());
     if (zoom_delta - 1.0).abs() > 0.001 && ui.rect_contains_pointer(avail) {
         let z = view.zoom * zoom_delta;
-        view.set_zoom(z);
+        match ui.input(|i| i.pointer.hover_pos()) {
+            Some(p) => view.zoom_at(z, p),
+            None => view.set_zoom(z),
+        }
     }
+    view.viewport_screen = avail;
 
-    let max_w = info.pages.iter().map(|p| p.width).fold(0.0, f32::max) * view.zoom * PT * if view.layout == PageLayout::TwoUp { 2.0 } else { 1.0 };
+    let max_w = info.pages.iter().map(|p| view.display_size(p).0).fold(0.0, f32::max)
+        * view.zoom
+        * PT
+        * if view.layout == PageLayout::TwoUp { 2.0 } else { 1.0 };
     let content_w = (max_w + 2.0 * SIDE).max(avail.width());
     let rects = view.layout(info, content_w);
     let visible_pages: Vec<usize> = match view.layout {
@@ -294,7 +659,11 @@ pub fn document_area(app: &mut PrintCraftApp, index: usize, ui: &mut egui::Ui) {
         drag: if app.quick_tool == QuickTool::Hand { egui::scroll_area::DragScroll::Always } else { egui::scroll_area::DragScroll::OnTouch },
         ..Default::default()
     });
-    if let Some((page, frac)) = view.goto.take() {
+    if let Some((page, fx, fy, rel)) = view.zoom_anchor.take() {
+        let r = rects[page.min(rects.len() - 1)];
+        let point = pos2(r.left() + fx * r.width(), r.top() - y_shift + fy * r.height());
+        scroll = scroll.scroll_offset(vec2((point.x - rel.x).max(0.0), (point.y - rel.y).max(0.0)));
+    } else if let Some((page, frac)) = view.goto.take() {
         let page = page.min(rects.len() - 1);
         let r = rects[page];
         scroll = scroll.vertical_scroll_offset((r.top() - y_shift - GAP + frac * r.height()).max(0.0));
@@ -307,11 +676,14 @@ pub fn document_area(app: &mut PrintCraftApp, index: usize, ui: &mut egui::Ui) {
     let mut clicked_link: Option<LinkTarget> = None;
 
     let out = scroll.show_viewport(ui, |ui, viewport| {
-        let (resp_rect, resp) = ui.allocate_exact_size(vec2(content_w, content_h), Sense::click());
+        let (resp_rect, resp) = ui.allocate_exact_size(vec2(content_w, content_h), Sense::click_and_drag());
         let origin = resp_rect.min - vec2(0.0, y_shift);
         let painter = ui.painter();
         let visible = viewport.translate(resp_rect.min.to_vec2());
         let mut wanted = Vec::new();
+        let mut visible_now = Vec::new();
+        view.screen_rects.clear();
+        view.screen_xforms.clear();
         let mut current = view.current;
         let mut best_overlap = -1.0f32;
         let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -320,33 +692,163 @@ pub fn document_area(app: &mut PrintCraftApp, index: usize, ui: &mut egui::Ui) {
             if !r.intersects(visible.expand(400.0)) {
                 continue;
             }
+            if r.intersects(visible) {
+                visible_now.push(i);
+                view.screen_rects.push((i, r));
+                view.screen_xforms
+                    .push((i, PageXform { rect: r, rot: view.rotation, pw: info.pages[i].width.max(1.0), ph: info.pages[i].height.max(1.0) }));
+            }
             let overlap = r.intersect(visible).height();
             if overlap > best_overlap {
                 best_overlap = overlap;
                 current = i;
             }
-            // Shadow + paper.
-            painter.rect_filled(r.translate(vec2(0.0, 2.0)).expand(1.5), CornerRadius::same(2), t.page_shadow);
+            let xf = PageXform { rect: r, rot: view.rotation, pw: info.pages[i].width.max(1.0), ph: info.pages[i].height.max(1.0) };
+            // Soft shadow + paper.
+            painter.add(egui::epaint::Shadow { offset: [0, 3], blur: 14, spread: 0, color: t.page_shadow }.as_shape(r, CornerRadius::ZERO));
             painter.rect_filled(r, CornerRadius::ZERO, Color32::WHITE);
-            match view.pages.get(&i) {
-                Some(p) => {
-                    painter.image(p.tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-                    if p.tag != tag {
-                        wanted.push(i);
+            if let Some(err) = view.errors.get(&i) {
+                painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgb(0xFB, 0xF4, 0xF4));
+                icons::paint(
+                    ui,
+                    Rect::from_center_size(r.center() - vec2(0.0, 26.0), vec2(28.0, 28.0)),
+                    "triangle-alert",
+                    26.0,
+                    Color32::from_rgb(0xC8, 0x3A, 0x3A),
+                );
+                let msg = ui.fonts_mut(|f| {
+                    f.layout(
+                        format!("This page couldn't be displayed.\n{err}"),
+                        theme::regular(12.5),
+                        Color32::from_rgb(0x6A, 0x2A, 0x2A),
+                        (r.width() - 40.0).max(80.0),
+                    )
+                });
+                painter.galley(pos2(r.center().x - msg.size().x / 2.0, r.center().y), msg, Color32::BLACK);
+            } else {
+                let (pw_pt, ph_pt) = (info.pages[i].width.max(1.0), info.pages[i].height.max(1.0));
+                let tiled = pw_pt.max(ph_pt) * scale > TILE_THRESHOLD;
+                // Whole-page raster: sharp when small, a low-res backdrop when tiled.
+                let (want_scale, want_tag) = if tiled {
+                    let bs = BASE_SIDE / pw_pt.max(ph_pt);
+                    (bs, (bs * 1000.0) as u64)
+                } else {
+                    (scale, tag)
+                };
+                match view.pages.get(&i) {
+                    Some(p) => {
+                        xf.paint_image(painter, p.tex.id(), 0.0, 0.0, 1.0, 1.0);
+                        if p.tag != want_tag {
+                            wanted.push((i, want_scale, want_tag, None));
+                        }
+                    }
+                    None => {
+                        wanted.push((i, want_scale, want_tag, None));
+                        let now = ui.input(|inp| inp.time);
+                        let since = *view.waiting_since.entry(i).or_insert(now);
+                        let msg = if now - since > 6.0 { "Still rendering — this page is unusually complex…" } else { "Rendering…" };
+                        painter.text(r.center(), Align2::CENTER_CENTER, msg, theme::regular(12.0), t.text_faint);
                     }
                 }
-                None => {
-                    wanted.push(i);
-                    painter.text(r.center(), Align2::CENTER_CENTER, "Rendering…", theme::regular(12.0), t.text_faint);
+                if tiled && r.intersects(visible) {
+                    // Device-pixel geometry of the scaled page, and the visible part of it
+                    // (found by mapping the visible screen corners back into the page).
+                    let (dw, dh) = ((pw_pt * scale).round() as u32, (ph_pt * scale).round() as u32);
+                    let vis = r.intersect(visible);
+                    let corners = [vis.left_top(), vis.right_top(), vis.right_bottom(), vis.left_bottom()].map(|c| xf.screen_to_norm(c));
+                    let (u0, u1) = corners.iter().fold((1.0f32, 0.0f32), |(a, b), c| (a.min(c.0), b.max(c.0)));
+                    let (v0, v1) = corners.iter().fold((1.0f32, 0.0f32), |(a, b), c| (a.min(c.1), b.max(c.1)));
+                    let (vx0, vy0) = ((u0.max(0.0) * dw as f32) as u32, (v0.max(0.0) * dh as f32) as u32);
+                    let (vx1, vy1) = (((u1.min(1.0) * dw as f32).ceil() as u32).min(dw), ((v1.min(1.0) * dh as f32).ceil() as u32).min(dh));
+                    for ty in vy0 / TILE..=(vy1.saturating_sub(1)) / TILE {
+                        for tx in vx0 / TILE..=(vx1.saturating_sub(1)) / TILE {
+                            let (x, y) = (tx * TILE, ty * TILE);
+                            let (w, h) = (TILE.min(dw.saturating_sub(x)), TILE.min(dh.saturating_sub(y)));
+                            if w == 0 || h == 0 {
+                                continue;
+                            }
+                            match view.tiles.get(&(i, tx, ty)) {
+                                Some((ttag, tex)) if *ttag == tag => {
+                                    let (fw, fh) = (dw as f32, dh as f32);
+                                    xf.paint_image(painter, tex.id(), x as f32 / fw, y as f32 / fh, (x + w) as f32 / fw, (y + h) as f32 / fh);
+                                }
+                                _ => wanted.push((i, scale, tag, Some(Tile { x, y, w, h }))),
+                            }
+                        }
+                    }
                 }
             }
-            painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
+            painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(0.5, t.border.gamma_multiply(0.8)), egui::StrokeKind::Outside);
+
+            // Text layer: find matches, selection, I-beam and drag-to-select.
+            let to_screen = |g: [f32; 4]| xf.view_rect(g);
+            if let Some(text) = view.texts.get(&i).cloned() {
+                if let Some(f) = &view.find {
+                    for (k, (mp, range)) in f.matches.iter().enumerate() {
+                        if *mp != i {
+                            continue;
+                        }
+                        let current = f.current == Some(k);
+                        for lr in text.line_rects(range.clone()) {
+                            let fill = if current {
+                                Color32::from_rgba_unmultiplied(255, 140, 0, 110)
+                            } else {
+                                Color32::from_rgba_unmultiplied(255, 214, 0, 90)
+                            };
+                            painter.rect_filled(to_screen(lr).expand(1.0), CornerRadius::same(2), fill);
+                        }
+                    }
+                }
+                if let Some(sel) = view.selection.filter(|s| s.page == i) {
+                    for lr in text.line_rects(sel.range()) {
+                        painter.rect_filled(to_screen(lr), CornerRadius::same(1), Color32::from_rgba_unmultiplied(0x3A, 0x7B, 0xF0, 70));
+                    }
+                }
+                if !hand && let Some(p) = pointer.filter(|p| r.contains(*p)) {
+                    let (vx, vy) = xf.screen_to_view(p);
+                    let over_text = text.glyphs.iter().any(|g| vx >= g.rect[0] && vx <= g.rect[2] && vy >= g.rect[1] && vy <= g.rect[3]);
+                    let over_link = info.links.iter().any(|l| l.page == i && xf.user_rect(info, i, l.rect).contains(p));
+                    if over_text && !over_link {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+                    }
+                    let press_here = ui.input(|inp| inp.pointer.press_origin()).is_some_and(|o| r.contains(o));
+                    if resp.drag_started() && press_here && !over_link {
+                        let origin = ui.input(|inp| inp.pointer.press_origin()).unwrap_or(p);
+                        let (ox, oy) = xf.screen_to_view(origin);
+                        view.selection = text.nearest(ox, oy).map(|a| Selection { page: i, anchor: a, head: a });
+                    }
+                    if resp.dragged()
+                        && let Some(sel) = view.selection.as_mut().filter(|s| s.page == i)
+                        && let Some(h) = text.nearest(vx, vy)
+                    {
+                        sel.head = h;
+                    }
+                    if resp.double_clicked() && over_text {
+                        if let Some(a) = text.nearest(vx, vy) {
+                            // Expand to the word: stop at inferred spaces, explicit spaces and line ends.
+                            let is_break = |k: usize| text.glyphs[k].text.trim().is_empty();
+                            let mut s0 = a;
+                            while s0 > 0 && !text.space_before[s0] && text.line_of[s0 - 1] == text.line_of[s0] && !is_break(s0 - 1) {
+                                s0 -= 1;
+                            }
+                            let mut e = a;
+                            while e + 1 < text.glyphs.len() && !text.space_before[e + 1] && text.line_of[e + 1] == text.line_of[e] && !is_break(e + 1)
+                            {
+                                e += 1;
+                            }
+                            view.selection = Some(Selection { page: i, anchor: s0, head: e });
+                        }
+                    } else if resp.clicked() && !over_link {
+                        view.selection = None;
+                    }
+                }
+            }
 
             // Form-field highlight (Acrobat's "Highlight existing fields").
             if view.highlight_fields {
                 for f in info.fields.iter().filter(|f| f.page == Some(i)) {
                     if let Some(fr) = f.rect {
-                        let sr = page_to_screen(info, i, r, fr);
+                        let sr = xf.user_rect(info, i, fr);
                         painter.rect_filled(sr, CornerRadius::same(1), Color32::from_rgba_unmultiplied(0x6E, 0x8E, 0xF5, 48));
                         painter.rect_stroke(
                             sr,
@@ -360,7 +862,7 @@ pub fn document_area(app: &mut PrintCraftApp, index: usize, ui: &mut egui::Ui) {
             // Link hover + click.
             if let Some(p) = pointer {
                 for l in info.links.iter().filter(|l| l.page == i) {
-                    let sr = page_to_screen(info, i, r, l.rect);
+                    let sr = xf.user_rect(info, i, l.rect);
                     if sr.contains(p) {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         let label = match &l.target {
@@ -376,7 +878,7 @@ pub fn document_area(app: &mut PrintCraftApp, index: usize, ui: &mut egui::Ui) {
                 }
                 // Annotation hover shows the comment, as Acrobat's popups do.
                 for a in info.annotations.iter().filter(|a| a.page == i) {
-                    let sr = page_to_screen(info, i, r, a.rect);
+                    let sr = xf.user_rect(info, i, a.rect);
                     if sr.contains(p) && hover_text.is_none() {
                         let who = a.author.clone().unwrap_or_else(|| a.subtype.clone());
                         let body = a.contents.clone().unwrap_or_default();
@@ -393,7 +895,7 @@ pub fn document_area(app: &mut PrintCraftApp, index: usize, ui: &mut egui::Ui) {
                 let age = (now - t0) as f32;
                 if age < 1.6 {
                     let a = ((1.6 - age) / 1.6 * 255.0) as u8;
-                    let sr = page_to_screen(info, i, r, fr).expand(4.0);
+                    let sr = xf.user_rect(info, i, fr).expand(4.0);
                     painter.rect_stroke(
                         sr,
                         CornerRadius::same(3),
@@ -412,19 +914,37 @@ pub fn document_area(app: &mut PrintCraftApp, index: usize, ui: &mut egui::Ui) {
                 view.page_input = (current + 1).to_string();
             }
         }
-        wanted
+        (wanted, visible_now)
     });
 
+    // Bound texture memory: keep sharp rasters only near the current page.
+    if view.pages.len() > 24 {
+        let cur = view.current;
+        view.pages.retain(|&p, _| p.abs_diff(cur) <= 8);
+    }
     // Schedule renders: visible pages first (nearest the current page), then thumbnails.
-    let mut wanted = out.inner;
+    let (mut wanted, visible_now) = out.inner;
     let cur = view.current;
-    wanted.sort_by_key(|&p| (p as isize - cur as isize).unsigned_abs());
-    let mut queue: Vec<RenderRequest> = wanted.into_iter().map(|page| RenderRequest { page, scale, tag }).collect();
+    // Nearest pages first; for each page, the backdrop before its tiles.
+    wanted.sort_by_key(|w| ((w.0 as isize - cur as isize).unsigned_abs(), w.3.is_some()));
+    // Tiles for other zoom levels or far-away pages are useless: free them.
+    view.tiles.retain(|(p, _, _), (t, _)| *t == tag && p.abs_diff(cur) <= 2);
+    let mut queue: Vec<RenderRequest> =
+        wanted.iter().map(|&(page, scale, tag, tile)| RenderRequest { page, kind: RequestKind::Pixels, tile, scale, tag }).collect();
+    // Text layers: visible pages for selection, every page while a search is active.
+    let need_text = |p: &usize| !view.texts.contains_key(p) && !view.text_failed.contains(p);
+    let mut text_pages: Vec<usize> = if hand { Vec::new() } else { visible_now.iter().copied().filter(need_text).collect() };
+    if view.find.as_ref().is_some_and(|f| !f.case_query.trim().is_empty()) {
+        let n = info.pages.len();
+        let rest: Vec<usize> = (0..n).map(|k| (cur + k) % n).filter(need_text).filter(|p| !text_pages.contains(p)).collect();
+        text_pages.extend(rest);
+    }
+    queue.extend(text_pages.into_iter().map(|page| RenderRequest { page, kind: RequestKind::Text, tile: None, scale: 1.0, tag: TEXT_TAG }));
     if want_thumbs {
         let s = THUMB_W * ppp / info.pages.iter().map(|p| p.width).fold(1.0, f32::max);
         for page in 0..info.pages.len() {
-            if !view.thumbs.contains_key(&page) {
-                queue.push(RenderRequest { page, scale: s, tag: THUMB_TAG });
+            if !view.thumbs.contains_key(&page) && !view.errors.contains_key(&page) {
+                queue.push(RenderRequest { page, kind: RequestKind::Pixels, tile: None, scale: s, tag: THUMB_TAG });
             }
         }
     }
@@ -444,6 +964,7 @@ pub fn document_area(app: &mut PrintCraftApp, index: usize, ui: &mut egui::Ui) {
             });
         });
     }
+    find_bar(view, info.pages.len(), avail, ui, &t);
     match clicked_link {
         Some(LinkTarget::Page(p)) => view.go_to_page(p),
         Some(LinkTarget::Uri(u)) => ui.ctx().open_url(egui::OpenUrl::new_tab(u)),
@@ -451,6 +972,76 @@ pub fn document_area(app: &mut PrintCraftApp, index: usize, ui: &mut egui::Ui) {
         None => {}
     }
     quick_bar(app, avail, ui);
+}
+
+/// Acrobat-style floating find bar at the top-right of the document area.
+fn find_bar(view: &mut DocView, pages: usize, area: Rect, ui: &mut egui::Ui, t: &Tokens) {
+    let Some(find) = view.find.as_mut() else { return };
+    let mut close = false;
+    let mut step: Option<bool> = None;
+    let searched = view.texts.len() + view.text_failed.len();
+    egui::Area::new(egui::Id::new("find-bar"))
+        .order(egui::Order::Middle)
+        .pivot(Align2::RIGHT_TOP)
+        .fixed_pos(area.right_top() + vec2(-18.0, 12.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::NONE
+                .fill(t.card)
+                .stroke(Stroke::new(1.0, t.border))
+                .corner_radius(CornerRadius::same(10))
+                .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(if t.dark() { 90 } else { 30 }) })
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(icons::image("search", 16.0, t.text_muted));
+                        let edit = egui::TextEdit::singleline(&mut find.query)
+                            .id(egui::Id::new("find-input"))
+                            .hint_text("Find text")
+                            .desired_width(220.0)
+                            .frame(egui::Frame::NONE);
+                        let r = ui.add(edit);
+                        if find.focus {
+                            r.request_focus();
+                            find.focus = false;
+                        }
+                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            step = Some(!ui.input(|i| i.modifiers.shift));
+                            r.request_focus();
+                        }
+                        if r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            close = true;
+                        }
+                        let status = if find.query.trim().is_empty() {
+                            String::new()
+                        } else if find.matches.is_empty() {
+                            if searched < pages { format!("Searching… {searched}/{pages}") } else { "No matches".into() }
+                        } else {
+                            let more = if searched < pages { "+" } else { "" };
+                            format!("{} of {}{more}", find.current.map(|c| c + 1).unwrap_or(0), find.matches.len())
+                        };
+                        ui.label(egui::RichText::new(status).font(theme::regular(12.0)).color(t.text_muted));
+                        if icons::button(ui, "chevron-up", 26.0, false, "Previous (⇧⌘G)").clicked() {
+                            step = Some(false);
+                        }
+                        if icons::button(ui, "chevron-down", 26.0, false, "Next (⌘G)").clicked() {
+                            step = Some(true);
+                        }
+                        if icons::button(ui, "x", 26.0, false, "Close (Esc)").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+        });
+    if close {
+        view.find = None;
+        return;
+    }
+    if find.query != find.case_query {
+        view.rerun_find();
+    }
+    if let Some(forward) = step {
+        view.find_step(forward);
+    }
 }
 
 fn notices(view: &mut DocView, info: &DocInfo, ui: &mut egui::Ui, t: &Tokens) {
@@ -519,11 +1110,80 @@ fn quick_bar(app: &mut PrintCraftApp, area: Rect, ui: &mut egui::Ui) {
     });
 }
 
-/// Organize pages: a thumbnail grid (Acrobat's Organize Pages view).
-fn organize_grid(view: &mut DocView, info: &DocInfo, pool: &RenderPool, ui: &mut egui::Ui, t: &Tokens) {
+/// The organize toolbar: page operations on the selection (Acrobat's Organize Pages bar).
+fn organize_toolbar(view: &mut DocView, info: &DocInfo, editable: bool, ui: &mut egui::Ui, t: &Tokens) {
+    let targets = view.target_pages();
+    let n = info.pages.len();
+    let (first, last) = (targets.first().copied().unwrap_or(0), targets.last().copied().unwrap_or(0));
+    egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(16, 8)).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let label = match view.selected.len() {
+                0 => format!("Page {} of {n}", view.current + 1),
+                1 => "1 page selected".to_string(),
+                k => format!("{k} pages selected"),
+            };
+            // Fixed width so the buttons never shift as the selection text changes.
+            ui.add_sized([150.0, 30.0], egui::Label::new(egui::RichText::new(label).font(theme::medium(13.0)).color(t.text_muted)).truncate());
+            ui.add_enabled_ui(editable, |ui| {
+                if icons::button(ui, "rotate-ccw", 30.0, false, "Rotate counterclockwise").clicked() {
+                    view.pending_edit = Some(Edit::RotatePages { pages: targets.clone(), degrees: -90 });
+                }
+                if icons::button(ui, "rotate-cw", 30.0, false, "Rotate clockwise").clicked() {
+                    view.pending_edit = Some(Edit::RotatePages { pages: targets.clone(), degrees: 90 });
+                }
+                let can_delete = targets.len() < n;
+                if ui.add_enabled_ui(can_delete, |ui| icons::button(ui, "trash-2", 30.0, false, "Delete pages (Delete)")).inner.clicked() {
+                    view.pending_edit = Some(Edit::DeletePages { pages: targets.clone() });
+                }
+                if icons::button(ui, "file-plus", 30.0, false, "Insert a blank page after the selection").clicked() {
+                    let c = info.pages[last].crop;
+                    let (w, h) = ((c[2] - c[0]).abs().max(1.0) as f64, (c[3] - c[1]).abs().max(1.0) as f64);
+                    view.pending_edit = Some(Edit::InsertBlankPage { at: last + 1, width: w, height: h });
+                }
+                if ui.add_enabled_ui(first > 0, |ui| icons::button(ui, "chevron-left", 30.0, false, "Move earlier")).inner.clicked() {
+                    view.pending_edit = Some(Edit::MovePages { pages: targets.clone(), to: first - 1 });
+                }
+                if ui.add_enabled_ui(last + 1 < n, |ui| icons::button(ui, "chevron-right", 30.0, false, "Move later")).inner.clicked() {
+                    view.pending_edit = Some(Edit::MovePages { pages: targets.clone(), to: first + 1 });
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::ghost_button(ui, "x", "Close").on_hover_text("Back to the document").clicked() {
+                    view.organize = false;
+                }
+            });
+        });
+    });
+    // Keys act on the selection unless a text field has focus.
+    if editable && !ui.ctx().egui_wants_keyboard_input() {
+        use egui::{Key, KeyboardShortcut, Modifiers};
+        let (del, all, esc) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::Delete) || i.consume_key(Modifiers::NONE, Key::Backspace),
+                i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::A)),
+                i.consume_key(Modifiers::NONE, Key::Escape),
+            )
+        });
+        if del && targets.len() < n {
+            view.pending_edit = Some(Edit::DeletePages { pages: targets });
+        }
+        if all {
+            view.selected = (0..n).collect();
+        }
+        if esc {
+            view.selected.clear();
+        }
+    }
+}
+
+/// Organize pages: a thumbnail grid (Acrobat's Organize Pages view). Click selects, ⌘-click
+/// toggles, ⇧-click extends; double-click opens the page.
+fn organize_grid(view: &mut DocView, info: &DocInfo, pool: &RenderPool, editable: bool, ui: &mut egui::Ui, t: &Tokens) {
     let ppp = ui.ctx().pixels_per_point();
     let cell = vec2(190.0, 250.0);
     let mut open_page = None;
+    organize_toolbar(view, info, editable, ui, t);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.add_space(20.0);
         let cols = ((ui.available_width() - 40.0) / cell.x).floor().max(1.0) as usize;
@@ -536,12 +1196,18 @@ fn organize_grid(view: &mut DocView, info: &DocInfo, pool: &RenderPool, ui: &mut
                 let Some(p) = info.pages.get(i) else { break };
                 let c = Rect::from_min_size(pos2(row_rect.left() + left + col as f32 * cell.x, row_rect.top()), cell);
                 let resp = ui.interact(c, ui.id().with(("org", i)), Sense::click());
+                resp.widget_info(|| {
+                    egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, view.selected.contains(&i), format!("Page {}", p.label))
+                });
                 let s = (cell.x - 44.0) / p.width.max(1.0);
                 let size = vec2(p.width * s, p.height * s).min(vec2(cell.x - 44.0, cell.y - 56.0));
                 let pr = Rect::from_center_size(pos2(c.center().x, c.top() + 16.0 + size.y / 2.0), size);
-                let selected = i == view.current;
+                let selected = view.selected.contains(&i) || (view.selected.is_empty() && i == view.current);
                 if selected || resp.hovered() {
                     ui.painter().rect_filled(c.shrink(6.0), CornerRadius::same(8), if selected { t.accent_soft } else { t.hover });
+                }
+                if view.selected.contains(&i) {
+                    ui.painter().rect_stroke(c.shrink(6.0), CornerRadius::same(8), Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
                 }
                 ui.painter().rect_filled(pr.translate(vec2(0.0, 1.5)), CornerRadius::same(1), t.page_shadow);
                 ui.painter().rect_filled(pr, CornerRadius::ZERO, Color32::WHITE);
@@ -551,6 +1217,19 @@ fn organize_grid(view: &mut DocView, info: &DocInfo, pool: &RenderPool, ui: &mut
                 ui.painter().rect_stroke(pr, CornerRadius::ZERO, Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
                 ui.painter().text(pos2(c.center().x, pr.bottom() + 16.0), Align2::CENTER_CENTER, &p.label, theme::medium(12.0), t.text_muted);
                 if resp.clicked() {
+                    let m = ui.input(|i| i.modifiers);
+                    if m.shift {
+                        let a = view.select_anchor.unwrap_or(view.current);
+                        view.selected = (a.min(i)..=a.max(i)).collect();
+                    } else if m.command {
+                        if !view.selected.remove(&i) {
+                            view.selected.insert(i);
+                        }
+                        view.select_anchor = Some(i);
+                    } else {
+                        view.selected = [i].into();
+                        view.select_anchor = Some(i);
+                    }
                     view.current = i;
                 }
                 if resp.double_clicked() {
@@ -560,8 +1239,10 @@ fn organize_grid(view: &mut DocView, info: &DocInfo, pool: &RenderPool, ui: &mut
         }
     });
     let s = THUMB_W * ppp / info.pages.iter().map(|p| p.width).fold(1.0, f32::max);
-    let queue: Vec<RenderRequest> =
-        (0..info.pages.len()).filter(|p| !view.thumbs.contains_key(p)).map(|page| RenderRequest { page, scale: s, tag: THUMB_TAG }).collect();
+    let queue: Vec<RenderRequest> = (0..info.pages.len())
+        .filter(|p| !view.thumbs.contains_key(p) && !view.errors.contains_key(p))
+        .map(|page| RenderRequest { page, kind: RequestKind::Pixels, tile: None, scale: s, tag: THUMB_TAG })
+        .collect();
     if queue != view.last_queue {
         pool.set_queue(queue.clone());
         view.last_queue = queue;

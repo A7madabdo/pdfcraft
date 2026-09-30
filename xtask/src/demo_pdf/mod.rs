@@ -58,7 +58,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let chrome = chrome::find(chrome_override.as_deref())?;
     println!("demo-pdf: printing with {}", chrome.display());
     let raw = build.join("chrome.pdf");
-    chrome::print_to_pdf(&chrome, &html_path, &raw, &build.join("chrome-profile"))?;
+    chrome::print_to_pdf(&chrome, &html_path, &raw, &build.join("chrome.log"))?;
 
     println!("demo-pdf: post-processing");
     let mut doc = lopdf::Document::load(&raw).with_context(|| format!("loading {}", raw.display()))?;

@@ -8,15 +8,24 @@
 
 mod inspect;
 mod raster;
+pub mod text;
 
-pub use inspect::{Annotation, Attachment, DocInfo, Field, FieldKind, Layer, Link, LinkTarget, OutlineItem, PageInfo, inspect};
-pub use raster::{RenderPool, RenderRequest, RenderedPage};
+pub use inspect::{
+    Annotation, Attachment, AttachmentSource, DocInfo, Field, FieldKind, FontInfo, Layer, Link, LinkTarget, OutlineItem, PageInfo, attachment_data,
+    inspect,
+};
+pub use raster::{MAX_PIXELS, MAX_SIDE, PageRenderer, RenderConfig, RenderPool, RenderRequest, RenderedPage, RequestKind, Tile, effective_scale};
+pub use text::{PageText, TextGlyph};
 
 /// Errors surfaced to the user when a document cannot be opened.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
     #[error("the file is not a readable PDF: {0}")]
     Invalid(String),
-    #[error("the document is encrypted and needs a password")]
+    #[error("the document is protected by a password")]
     NeedsPassword,
+    #[error("the password is incorrect")]
+    WrongPassword,
+    #[error("{0}")]
+    Unsupported(String),
 }

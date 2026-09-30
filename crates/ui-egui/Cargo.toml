@@ -13,8 +13,19 @@ printcraft-engine = { workspace = true }
 printcraft-render = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true }
-eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit"] }
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "persistence"] }
 serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlAnchorElement", "Blob", "BlobPropertyBag", "Url"] }
+
+[dev-dependencies]
+egui_kittest = { workspace = true, features = ["eframe", "wgpu"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

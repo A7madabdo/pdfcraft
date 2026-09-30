@@ -42,6 +42,8 @@ pub fn paint(ui: &egui::Ui, rect: Rect, name: &str, size: f32, tint: Color32) {
 pub fn button(ui: &mut egui::Ui, name: &str, box_size: f32, selected: bool, tooltip: &str) -> Response {
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(box_size), Sense::click());
+    let label = if tooltip.is_empty() { name } else { tooltip };
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label));
     let hovered = resp.hovered();
     if selected {
         ui.painter().rect_filled(rect, t.radius, t.accent_soft);
