@@ -77,4 +77,4 @@ Open-source, clean-room, pure-Rust creative applications. Each is native on macO
 
 ## Licence
 
-MIT OR Apache-2.0 (proposed). Third-party material is listed in [NOTICE](NOTICE).
+MIT OR Apache-2.0 ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)). Every icon, font and image is openly licensed and listed, with its author and source, in [ATTRIBUTION.md](ATTRIBUTION.md). The policy is in [AGENTS.md](AGENTS.md), and required notices are in [NOTICE](NOTICE).

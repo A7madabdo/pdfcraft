@@ -1986,7 +1986,7 @@ licence = "MIT OR Apache-2.0"
 licence_file = "LICENSE-MIT"
 kind = "image"
 usage = "README hero image. Shows only PrintCraft UI, Lucide icons and the showcase PDF built from the [[fetched]] OFL fonts"
-sha256 = "cfc92a3caba0d2ce2438c4634be44c84db3fc83f74e3cf8f1afd6a52395a65a7"
+sha256 = "0b49c1b9b17fc4a6fa7dbb05b72dc675de88683c7d6317423527fd5501ee7beb"
 
 [[asset]]
 path = "docs/images/printcraft-organize.png"
@@ -1997,7 +1997,7 @@ licence = "MIT OR Apache-2.0"
 licence_file = "LICENSE-MIT"
 kind = "image"
 usage = "README image. Shows only PrintCraft UI, Lucide icons and the showcase PDF built from the [[fetched]] OFL fonts"
-sha256 = "bc1d578bffa0fee09d17e3b649032a8b58251f1ae897c6b2a75765e415ab0078"
+sha256 = "b823fb57adbe88ecaf6a20028e361e9727fda8afbed74dfeba64af513b9a4e6e"
 
 [[bundled]]
 crate = "epaint_default_fonts"

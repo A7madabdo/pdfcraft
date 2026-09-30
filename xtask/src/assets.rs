@@ -40,8 +40,8 @@ pub const ADOBE_DATA_ALLOWED: &[(&str, &str)] = &[("hayro-cmap", "assets/cmaps.b
 
 /// File extensions that count as assets wherever they appear in the repository.
 const ASSET_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "svg", "ico", "icns", "webp", "bmp", "tif", "tiff", "avif", "heic", "ttf", "otf", "ttc", "woff", "woff2", "pfb", "pfa", "afm",
-    "icc", "icm", "pdf", "eps", "ps", "ai", "psd", "mp3", "wav", "ogg", "flac", "mp4", "mov", "webm", "cur", "ani", "brotli",
+    "png", "jpg", "jpeg", "gif", "svg", "ico", "icns", "webp", "bmp", "tif", "tiff", "avif", "heic", "ttf", "otf", "ttc", "woff", "woff2", "pfb",
+    "pfa", "afm", "icc", "icm", "pdf", "eps", "ps", "ai", "psd", "mp3", "wav", "ogg", "flac", "mp4", "mov", "webm", "cur", "ani", "brotli",
 ];
 
 #[derive(Deserialize, Default)]
@@ -154,7 +154,11 @@ pub fn run(args: &[String]) -> Result<()> {
 
 /// Files in the working tree that git tracks or would track (respects .gitignore).
 fn repo_files(root: &Path) -> Result<Vec<String>> {
-    let out = Command::new("git").args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"]).current_dir(root).output().context("running git ls-files")?;
+    let out = Command::new("git")
+        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+        .current_dir(root)
+        .output()
+        .context("running git ls-files")?;
     if !out.status.success() {
         bail!("git ls-files failed");
     }
@@ -193,7 +197,7 @@ pub fn check(root: &Path, m: &Manifest, repo_files: &[String], lock: &BTreeSet<(
     let mut problems = Vec::new();
     let mut seen = BTreeSet::new();
     let visual = |kind: &str| matches!(kind, "icon" | "image" | "font" | "logo" | "cursor" | "video");
-    let mut licence_ok = |what: &str, licence: &str, problems: &mut Vec<String>| {
+    let licence_ok = |what: &str, licence: &str, problems: &mut Vec<String>| {
         for id in licence_ids(licence) {
             if !ALLOWED_LICENCES.contains(&id) {
                 problems.push(format!("{what}: licence `{id}` is not on the allowlist (AGENTS.md §1.2)"));
@@ -298,10 +302,15 @@ pub fn render_markdown(m: &Manifest) -> String {
     s.push_str("# Attribution\n\n");
     s.push_str("<!-- Generated from ATTRIBUTION.toml by `cargo xtask assets --write`. Do not edit by hand. -->\n\n");
     s.push_str("Every asset PrintCraft includes, bundles or uses to build its published material, with its author, source and licence. ");
-    s.push_str("The policy is in [AGENTS.md](AGENTS.md) §1. The machine-readable list, with SHA-256 hashes, is [ATTRIBUTION.toml](ATTRIBUTION.toml). ");
+    s.push_str(
+        "The policy is in [AGENTS.md](AGENTS.md) §1. The machine-readable list, with SHA-256 hashes, is [ATTRIBUTION.toml](ATTRIBUTION.toml). ",
+    );
     s.push_str("Licence texts are kept beside the assets and summarised in [NOTICE](NOTICE).\n\n");
     let esc = |t: &str| t.replace('|', "\\|");
-    s.push_str(&format!("## In this repository ({})\n\n| Asset | Title | Author | Licence | Source | Used for |\n|---|---|---|---|---|---|\n", m.asset.len()));
+    s.push_str(&format!(
+        "## In this repository ({})\n\n| Asset | Title | Author | Licence | Source | Used for |\n|---|---|---|---|---|---|\n",
+        m.asset.len()
+    ));
     for a in &m.asset {
         let _ = writeln!(s, "| `{}` | {} | {} | {} | {} | {} |", a.path, esc(&a.title), esc(&a.author), a.licence, esc(&a.source), esc(&a.usage));
     }
@@ -326,11 +335,11 @@ pub fn render_markdown(m: &Manifest) -> String {
         );
     }
     s.push_str(&format!(
-        "\n## Downloaded at build time ({})\n\nFetched by `cargo xtask demo-pdf` into `target/demo-fonts/`, verified by SHA-256 and never committed.\n\n| File | Title | Author | Licence | Source |\n|---|---|---|---|---|\n",
+        "\n## Downloaded at build time ({})\n\nFetched by `cargo xtask demo-pdf` into `target/demo-fonts/`, verified by SHA-256 and never committed.\n\n| File | Title | Author | Licence | Source | Used for |\n|---|---|---|---|---|---|\n",
         m.fetched.len()
     ));
     for f in &m.fetched {
-        let _ = writeln!(s, "| `{}` | {} | {} | {} | {} |", f.file, esc(&f.title), esc(&f.author), f.licence, esc(&f.source));
+        let _ = writeln!(s, "| `{}` | {} | {} | {} | {} | {} |", f.file, esc(&f.title), esc(&f.author), f.licence, esc(&f.source), esc(&f.usage));
     }
     s
 }
