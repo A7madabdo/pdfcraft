@@ -1,6 +1,6 @@
 [package]
-name = "printcraft-annot"
-description = "Annotations (comments): builders, appearance streams and edits, ISO 32000-2 §12.5"
+name = "printcraft-forms"
+description = "Interactive forms (AcroForm): field model, filling, appearances, reset (ISO 32000-2 §12.7)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
